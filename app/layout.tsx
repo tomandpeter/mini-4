@@ -5,7 +5,7 @@ import "./globals.css";
 
 const title = "MINI-4 — A Calculator Built On-Chain";
 const description =
-  "A deliberately tiny, truthful 1-bit calculator powered by read-only BNB Chain smart-contract calls.";
+  "A decimal-style 1-bit calculator that returns verified NAND, NOT, AND, XOR, SUM, and CARRY results through read-only BNB Chain calls.";
 
 export async function generateMetadata(): Promise<Metadata> {
   const requestHeaders = await headers();
@@ -37,7 +37,7 @@ export async function generateMetadata(): Promise<Metadata> {
           url: imageUrl,
           width: 1536,
           height: 1024,
-          alt: "MINI-4 1-bit on-chain half-adder instrument",
+          alt: "MINI-4 decimal-style 1-bit on-chain calculator",
         },
       ],
     },

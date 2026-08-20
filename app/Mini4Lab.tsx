@@ -1,10 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  type KeyboardEvent as ReactKeyboardEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 
 type Bit = 0 | 1;
 type CircuitKey = "nand" | "not" | "and" | "xor" | "halfAdder";
 type SiteState = "ready" | "blocked" | "degraded";
+type ActiveOperand = "A" | "B";
 
 type CircuitStatus = {
   key: CircuitKey;
@@ -290,7 +297,9 @@ function StatusConsole({
       : state === "checking"
         ? "CHECKING PROCESSOR"
         : state === "degraded"
-          ? "RPC UNAVAILABLE"
+          ? status?.error?.code === "RPC_UNAVAILABLE"
+            ? "RPC UNAVAILABLE"
+            : "CHAIN CHECK FAILED"
           : "CONFIGURATION BLOCKED";
   const detail = loadError ?? status?.error?.message;
   const processorAddress = status?.circuits.find((circuit) => circuit.address)?.address;
@@ -313,7 +322,7 @@ function StatusConsole({
         <div>
           <dt>CIRCUIT IDS</dt>
           <dd>
-            {status
+            {status?.status === "ready"
               ? `${status.circuits.filter((item) => item.configured).length}/5`
               : "0/5"}
           </dd>
@@ -402,8 +411,9 @@ export function Mini4Lab() {
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [statusLoading, setStatusLoading] = useState(true);
   const [statusError, setStatusError] = useState<string | null>(null);
-  const [adderA, setAdderA] = useState<Bit>(1);
-  const [adderB, setAdderB] = useState<Bit>(1);
+  const [adderA, setAdderA] = useState<Bit>(0);
+  const [adderB, setAdderB] = useState<Bit>(0);
+  const [activeOperand, setActiveOperand] = useState<ActiveOperand>("A");
   const [adderPending, setAdderPending] = useState(false);
   const [adderResult, setAdderResult] = useState<HalfAdderSuccess | null>(null);
   const [adderError, setAdderError] = useState<string | null>(null);
@@ -491,6 +501,63 @@ export function Mini4Lab() {
     }
   };
 
+  const enterCalculatorBit = (bit: Bit) => {
+    if (adderPending) return;
+    if (activeOperand === "A") setAdderA(bit);
+    else setAdderB(bit);
+    clearAdder();
+  };
+
+  const selectSecondOperand = () => {
+    if (adderPending) return;
+    setActiveOperand("B");
+    clearAdder();
+  };
+
+  const resetCalculator = () => {
+    if (adderPending) return;
+    setAdderA(0);
+    setAdderB(0);
+    setActiveOperand("A");
+    clearAdder();
+  };
+
+  const handleCalculatorKeyDown = (
+    event: ReactKeyboardEvent<HTMLElement>,
+  ) => {
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
+    const nestedControl =
+      event.target instanceof HTMLElement
+        ? event.target.closest("button, a")
+        : null;
+    if (
+      nestedControl instanceof HTMLAnchorElement ||
+      nestedControl?.classList.contains("text-button")
+    ) {
+      return;
+    }
+
+    if (event.key === "0" || event.key === "1") {
+      event.preventDefault();
+      enterCalculatorBit(Number(event.key) as Bit);
+      return;
+    }
+    if (event.key === "+") {
+      event.preventDefault();
+      selectSecondOperand();
+      return;
+    }
+    if (event.key === "Enter" || event.key === "=") {
+      event.preventDefault();
+      void runAdder();
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      resetCalculator();
+    }
+  };
+
   const clearLogic = () => {
     setLogicResults({});
     setLogicError(null);
@@ -563,120 +630,242 @@ export function Mini4Lab() {
         </nav>
       </header>
 
-      <section className="hero" id="top">
+      <section className="hero" id="top" aria-labelledby="page-title">
         <div className="hero__copy">
-          <p className="eyebrow">COMMUNITY-BUILT PROCESSOR / BNB MAINNET</p>
-          <h1>
+          <p className="eyebrow">ONE BIT / ONE PROCESSOR / BNB MAINNET</p>
+          <h1 id="page-title">
             A calculator
             <span>built on-chain.</span>
           </h1>
           <p className="hero__lede">
-            Built in public by the MINI-4 community: one processor contract,
-            five circuit IDs. Every answer must return from its bytecode through
-            read-only eth_call—or it does not appear at all.
+            Enter 0 or 1. MINI-4 asks a community-built processor for the answer
+            and shows nothing if the chain cannot verify it.
           </p>
           <div className="hero__proof">
-            <span>ONE PROCESSOR</span>
-            <span>BNB MAINNET</span>
             <span>NO WALLET</span>
             <span>NO TRANSACTION</span>
+            <span>NO GAS FEE</span>
             <span>READ-ONLY ETH_CALL</span>
           </div>
         </div>
-        <StatusConsole
-          status={status}
-          loading={statusLoading}
-          loadError={statusError}
-          onRetry={() => void refreshStatus()}
-        />
-      </section>
-
-      <section className="instrument" id="calculator" aria-labelledby="calculator-title">
-        <div className="instrument__rail" aria-hidden="true">
-          <span />
-          <span>MINI-4 PROCESSOR / CIRCUIT ID 05</span>
-          <span />
-        </div>
-        <div className="instrument__header">
-          <div>
-            <p className="eyebrow">CIRCUIT ID #5 / 1-BIT HALF ADDER</p>
-            <h2 id="calculator-title">The unnecessary on-chain calculator.</h2>
-          </div>
-          <div className="instrument__address">
-            <span>COMMUNITY PROCESSOR</span>
-            <strong>{shortAddress(circuitMap.get("halfAdder")?.address)}</strong>
-          </div>
-        </div>
-
-        <div className="adder-console">
-          <div className="input-bay">
-            <div className="input-bay__switches">
-              <BitSwitch
-                id="adder-a"
-                label="A"
-                value={adderA}
-                disabled={adderPending}
-                onChange={(next) => {
-                  setAdderA(next);
-                  clearAdder();
-                }}
-              />
-              <span className="operator" aria-hidden="true">+</span>
-              <BitSwitch
-                id="adder-b"
-                label="B"
-                value={adderB}
-                disabled={adderPending}
-                onChange={(next) => {
-                  setAdderB(next);
-                  clearAdder();
-                }}
-              />
+        <section
+          className="calculator-machine"
+          id="calculator"
+          aria-labelledby="calculator-title"
+          aria-describedby="calculator-help keyboard-help"
+          tabIndex={0}
+          onKeyDown={handleCalculatorKeyDown}
+        >
+          <header className="calculator-machine__header">
+            <div>
+              <span className="calculator-machine__brand">MINI-4</span>
+              <h2 id="calculator-title">Decimal calculator</h2>
             </div>
-            <button
-              className="execute-button"
-              type="button"
-              disabled={!ready || adderPending}
-              onClick={() => void runAdder()}
-            >
-              <span>{adderPending ? "READING BLOCK…" : "ADD ON-CHAIN"}</span>
-              <span aria-hidden="true">→</span>
-            </button>
-            {!ready ? (
-              <p className="blocked-note">
-                Enabled only after the MINI-4 processor, BNB mainnet RPC, and all
-                five circuit IDs pass configuration checks.
+            <div className="mode-badge">
+              <span aria-hidden="true" />
+              1-BIT MODE
+            </div>
+          </header>
+
+          <div
+            className="calculator-display"
+            aria-live="polite"
+            aria-atomic="true"
+            aria-busy={adderPending}
+          >
+            <div className="calculator-display__topline">
+              <span>DECIMAL / CIRCUIT ID #5</span>
+              <span>{adderPending ? "READING BNB MAINNET…" : "READY FOR INPUT"}</span>
+            </div>
+            <div className="calculator-expression" aria-label={`Expression: ${adderA} plus ${adderB}`}>
+              <button
+                className={`operand ${activeOperand === "A" ? "operand--active" : ""}`}
+                type="button"
+                aria-pressed={activeOperand === "A"}
+                disabled={adderPending}
+                onClick={() => setActiveOperand("A")}
+              >
+                <small>A</small>
+                <strong>{adderA}</strong>
+              </button>
+              <span aria-hidden="true">+</span>
+              <button
+                className={`operand ${activeOperand === "B" ? "operand--active" : ""}`}
+                type="button"
+                aria-pressed={activeOperand === "B"}
+                disabled={adderPending}
+                onClick={() => setActiveOperand("B")}
+              >
+                <small>B</small>
+                <strong>{adderB}</strong>
+              </button>
+              <span aria-hidden="true">=</span>
+              <div className="calculator-decimal">
+                <small>CHAIN RESULT</small>
+                <strong>{adderPending ? "…" : (adderResult?.outputs.decimal ?? "—")}</strong>
+              </div>
+            </div>
+          </div>
+
+          <div className="calculator-signals">
+            <SignalLamp label="SUM" value={adderResult?.outputs.sum} pending={adderPending} />
+            <SignalLamp label="CARRY" value={adderResult?.outputs.carry} pending={adderPending} />
+            <div className="calculator-signals__mode">
+              <span>ACTIVE INPUT</span>
+              <strong>{activeOperand}</strong>
+            </div>
+          </div>
+
+          <div className="calculator-lower">
+            <div className="calculator-keypad" aria-label="Calculator keypad">
+              {[7, 8, 9, 4, 5, 6].map((digit) => (
+                <button
+                  className={`calculator-key calculator-key--${digit}`}
+                  type="button"
+                  key={digit}
+                  disabled
+                  aria-describedby="future-keys-note"
+                  aria-label={`${digit}, unavailable until a future 8-bit adder`}
+                >
+                  {digit}
+                </button>
+              ))}
+              <button
+                className="calculator-key calculator-key--plus calculator-key--operator"
+                type="button"
+                disabled={adderPending}
+                aria-label="Plus, move to operand B"
+                onClick={selectSecondOperand}
+              >
+                +
+              </button>
+              <button
+                className="calculator-key calculator-key--clear"
+                type="button"
+                disabled={adderPending}
+                aria-label="All clear, reset operands and chain result"
+                onClick={resetCalculator}
+              >
+                AC
+              </button>
+              <button
+                className="calculator-key calculator-key--1"
+                type="button"
+                disabled={adderPending}
+                aria-label={`Set operand ${activeOperand} to 1`}
+                onClick={() => enterCalculatorBit(1)}
+              >
+                1
+              </button>
+              {[2, 3].map((digit) => (
+                <button
+                  className={`calculator-key calculator-key--${digit}`}
+                  type="button"
+                  key={digit}
+                  disabled
+                  aria-describedby="future-keys-note"
+                  aria-label={`${digit}, unavailable until a future 8-bit adder`}
+                >
+                  {digit}
+                </button>
+              ))}
+              <button
+                className="calculator-key calculator-key--0"
+                type="button"
+                disabled={adderPending}
+                aria-label={`Set operand ${activeOperand} to 0`}
+                onClick={() => enterCalculatorBit(0)}
+              >
+                0
+              </button>
+              <button
+                className="calculator-key calculator-key--equals"
+                type="button"
+                disabled={!ready || adderPending}
+                aria-label="Equals, calculate on-chain"
+                onClick={() => void runAdder()}
+              >
+                <span>=</span>
+                <small>{adderPending ? "READING…" : "ON-CHAIN"}</small>
+              </button>
+            </div>
+
+            <div className="calculator-sidecar">
+              <StatusConsole
+                status={status}
+                loading={statusLoading}
+                loadError={statusError}
+                onRetry={() => void refreshStatus()}
+              />
+              <p className="calculator-help" id="calculator-help">
+                Select A or B, then press 0 or 1. Press + to move to B. Only =
+                ON-CHAIN asks the processor for a result.
               </p>
-            ) : null}
+              <p className="keyboard-help" id="keyboard-help">
+                Keyboard: 0 / 1 / + / Enter / Escape
+              </p>
+            </div>
           </div>
 
-          <div className="result-bay" aria-live="polite" aria-busy={adderPending}>
-            <div className="result-bay__signals">
-              <SignalLamp label="SUM" value={adderResult?.outputs.sum} pending={adderPending} />
-              <SignalLamp label="CARRY" value={adderResult?.outputs.carry} pending={adderPending} />
-            </div>
-            <div className="number-readout">
-              <div>
-                <span>BINARY</span>
-                <strong>{adderResult?.outputs.binary ?? "—"}</strong>
-              </div>
-              <div>
-                <span>DECIMAL</span>
-                <strong>{adderResult?.outputs.decimal ?? "—"}</strong>
-              </div>
-            </div>
+          <div className="calculator-footer">
+            <p id="future-keys-note">
+              Keys 2–9 are disabled. They need a future 8-bit adder.
+            </p>
             <p className="result-caption">
               {adderResult
-                ? `Returned by circuit ID #5 through the MINI-4 processor at block ${adderResult.evidence.blockNumber}.`
-                : "No result is precomputed in this interface."}
+                ? `Verified at block ${adderResult.evidence.blockNumber}. Decimal, SUM, and CARRY came from the processor response.`
+                : "No chain result yet. This screen never substitutes browser arithmetic."}
             </p>
+            {!ready ? (
+              <p className="blocked-note" id="calculator-blocked-note">
+                On-chain equals stays disabled until the processor and BNB mainnet
+                RPC pass verification.
+              </p>
+            ) : null}
             {adderError ? (
               <p className="error-message" role="alert">
                 {adderError}
               </p>
             ) : null}
           </div>
+        </section>
+      </section>
+
+      <section className="calculator-explainer" aria-labelledby="comparison-title">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">WHAT MAKES THIS DIFFERENT</p>
+            <h2 id="comparison-title">A normal calculator vs. MINI-4.</h2>
+          </div>
+          <p>
+            The point is not speed. It is making the computation independently
+            inspectable.
+          </p>
         </div>
+        <div className="comparison-grid">
+          <article>
+            <span>ORDINARY CALCULATOR</span>
+            <h3>Local and immediate.</h3>
+            <p>
+              Handles many digits and operations instantly in the device. The
+              answer does not need public chain evidence.
+            </p>
+          </article>
+          <article className="comparison-card--mini4">
+            <span>MINI-4 TODAY</span>
+            <h3>One-bit and verifiable.</h3>
+            <p>
+              Adds only 0 or 1 through a slower read-only eth_call, then exposes
+              the processor address, block, calldata, and raw result. No wallet,
+              transaction, or gas is required.
+            </p>
+          </article>
+        </div>
+        <p className="proxy-boundary">
+          <strong>Verification boundary:</strong> the community-created processor
+          is an upgradeable beacon proxy. Each result is verified at its recorded
+          block—not promised immutable forever.
+        </p>
       </section>
 
       <section className="logic-section" id="logic-lab" aria-labelledby="logic-title">
@@ -776,8 +965,8 @@ export function Mini4Lab() {
                   PROCESSOR ROUTE · {circuit.key === "halfAdder" ? "SUM + CARRY" : "1-BIT OUTPUT"}
                 </small>
               </div>
-              <span className={`circuit-state circuit-state--${circuit.configured ? "ready" : "blocked"}`}>
-                {circuit.configured ? "ID READY" : "ID UNAVAILABLE"}
+              <span className={`circuit-state circuit-state--${ready && circuit.configured ? "ready" : "blocked"}`}>
+                {ready && circuit.configured ? "ID READY" : "ID UNAVAILABLE"}
               </span>
             </article>
           ))}

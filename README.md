@@ -75,8 +75,46 @@ binary result         = 10
 decimal result        = 2
 ```
 
-The current UI intentionally accepts only single-bit inputs. It does not yet
-support arbitrary arithmetic, 0–255 addition, or multiplication.
+## Current arithmetic limit
+
+The **only arithmetic operation currently available** is Circuit ID `5`, a
+1-bit half adder. Its two inputs, `A` and `B`, must each be either `0` or `1`.
+The complete arithmetic range is therefore:
+
+| A | B | SUM | CARRY | Decimal result |
+| ---: | ---: | ---: | ---: | ---: |
+| `0` | `0` | `0` | `0` | `0` |
+| `0` | `1` | `1` | `0` | `1` |
+| `1` | `0` | `1` | `0` | `1` |
+| `1` | `1` | `0` | `1` | `2` |
+
+That means the only possible decimal results are `0`, `1`, and `2`. This half
+adder has **no carry-in**. MINI-4 cannot currently perform multi-bit addition,
+subtraction, multiplication, or division. Circuit IDs `1`–`4` are individual
+logic gates, not additional general-purpose arithmetic operations.
+
+## MINI-4 vs ordinary calculator
+
+| | Ordinary calculator | MINI-4 |
+| --- | --- | --- |
+| Where the calculation runs | Locally, on the device's CPU | On an RPC node executing the processor contract code against BNB Chain state |
+| Execution type | Local software operation | Read-only `eth_call` |
+| Transaction or consensus | None | The call is not mined, submitted as a transaction, or executed by consensus |
+| Wallet and gas | Not required | Not required |
+| Speed and range | Fast, flexible, and useful for everyday arithmetic | Slower because of RPC latency and currently limited to the circuits above |
+| Evidence | Usually just the displayed result | Can record processor address, block number, calldata, and raw return bytes |
+| Purpose | Practical calculation | Education, inspection, and reproducible verification of deployed logic |
+
+The contract code and state referenced by MINI-4 come from the selected chain
+block, but the `eth_call` itself is only executed by the responding RPC node. It
+does not become a transaction or a consensus record. Recording the processor,
+block, calldata, and raw result makes the read inspectable and reproducible; it
+does not make MINI-4 faster or more capable than a local calculator.
+
+MINI-4 is therefore an educational and verification-oriented experiment, not a
+practical replacement for an ordinary calculator. The processor is also an
+upgradeable beacon proxy, so the recorded block remains important: a future
+implementation may behave differently after an authorized upgrade.
 
 ## Reproduce the chain call
 
