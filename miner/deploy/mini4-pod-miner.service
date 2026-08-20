@@ -1,0 +1,34 @@
+[Unit]
+Description=MINI-4 Proof-of-Design Shadow Miner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mini4miner
+Group=mini4miner
+WorkingDirectory=/opt/mini4-pod-miner/current
+ExecStart=/usr/bin/python3 -m miner run --data-dir /var/lib/mini4-pod-miner --bind 127.0.0.1 --port 8787 --poll-seconds 300 --protocol-scan-seconds 21600
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=20
+Nice=10
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/mini4-pod-miner
+MemoryMax=256M
+CPUQuota=70%
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

@@ -42,3 +42,9 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+
+# Python shadow miner runtime
+__pycache__/
+*.py[cod]
+/miner/state/
+/miner/*.sqlite*

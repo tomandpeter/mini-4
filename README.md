@@ -6,6 +6,13 @@ MINI-4 is a small, honest interface for experimenting with a deployed logic
 processor on BNB Smart Chain mainnet. The current version exposes NAND, NOT,
 AND, XOR, and a 1-bit half adder through one processor contract.
 
+The repository also contains a lightweight [PoD Shadow Miner](miner/README.md)
+for an always-on VPS. It watches public TapeOut tasks and protocol publication
+signals, verifies MINI-4's public chain presence, reproduces the published
+scoring formula, and performs bounded flat-NAND research. It is intentionally
+read-only: no wallet, signer, transaction, tape-out, claim, or earnings claim is
+present while the reward contract and official task vectors remain unpublished.
+
 The browser calls MINI-4's same-origin API, which sends a read-only `eth_call`
 to a BNB Chain RPC endpoint. A node evaluates deployed contract bytecode against
 current chain state and returns the result. No wallet, signer, transaction, or
@@ -213,6 +220,7 @@ Useful checks:
 
 ```bash
 npm test
+npm run test:miner
 npm run lint
 npm run build
 ```
