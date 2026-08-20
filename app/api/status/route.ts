@@ -14,7 +14,11 @@ export async function GET(): Promise<Response> {
   let chainOnline: boolean | null = null;
   let rpcError: { code: string; message: string } | undefined;
 
-  if (config.chain.supported && config.chain.rpcConfigured) {
+  if (
+    config.chain.supported &&
+    config.chain.rpcConfigured &&
+    config.processor.configured
+  ) {
     try {
       const probe = await probeMini4Chain();
       blockNumber = probe.blockNumber;

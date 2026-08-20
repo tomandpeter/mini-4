@@ -70,6 +70,13 @@ type TelemetryEntry = {
 };
 
 const LOGIC_CIRCUITS = ["nand", "not", "and", "xor"] as const;
+const CIRCUIT_IDS: Record<CircuitKey, number> = {
+  nand: 1,
+  not: 2,
+  and: 3,
+  xor: 4,
+  halfAdder: 5,
+};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -83,7 +90,7 @@ function hasValidEvidence(value: unknown): value is Evidence {
   if (!isRecord(value)) return false;
 
   return (
-    (value.chainId === 56 || value.chainId === 97) &&
+    value.chainId === 56 &&
     typeof value.blockNumber === "string" &&
     /^\d+$/.test(value.blockNumber) &&
     typeof value.address === "string" &&
@@ -279,13 +286,14 @@ function StatusConsole({
       : (status?.status ?? "blocked");
   const headline =
     state === "ready"
-      ? "CHAIN READY"
+      ? "PROCESSOR READY"
       : state === "checking"
-        ? "CHECKING CHAIN"
+        ? "CHECKING PROCESSOR"
         : state === "degraded"
           ? "RPC UNAVAILABLE"
           : "CONFIGURATION BLOCKED";
   const detail = loadError ?? status?.error?.message;
+  const processorAddress = status?.circuits.find((circuit) => circuit.address)?.address;
 
   return (
     <aside className={`status-console status-console--${state}`} aria-live="polite">
@@ -303,7 +311,7 @@ function StatusConsole({
           <dd>{status?.blockNumber ?? "—"}</dd>
         </div>
         <div>
-          <dt>CIRCUITS</dt>
+          <dt>CIRCUIT IDS</dt>
           <dd>
             {status
               ? `${status.circuits.filter((item) => item.configured).length}/5`
@@ -311,7 +319,13 @@ function StatusConsole({
           </dd>
         </div>
       </dl>
-      {detail ? <p className="status-console__detail">{detail}</p> : null}
+      {detail ? (
+        <p className="status-console__detail">{detail}</p>
+      ) : processorAddress ? (
+        <p className="status-console__detail">
+          ONE COMMUNITY PROCESSOR · {shortAddress(processorAddress)}
+        </p>
+      ) : null}
       {loadError ? (
         <button className="text-button" type="button" onClick={onRetry}>
           Retry status
@@ -325,14 +339,15 @@ function EvidencePanel({ entries }: { entries: TelemetryEntry[] }) {
   return (
     <section className="telemetry" aria-labelledby="telemetry-title">
       <div className="section-kicker">
-        <span>READ-ONLY TELEMETRY</span>
-        <span>{entries.length ? "CHAIN EVIDENCE" : "AWAITING CALL"}</span>
+        <span>UNIFIED PROCESSOR / READ-ONLY TELEMETRY</span>
+        <span>{entries.length ? "ETH_CALL EVIDENCE" : "AWAITING CALL"}</span>
       </div>
-      <h3 id="telemetry-title">Every result leaves a call-evidence record.</h3>
+      <h3 id="telemetry-title">One processor. Every result traceable.</h3>
       {entries.length === 0 ? (
         <p className="telemetry__empty">
-          No browser-side answer is waiting underneath. A verified eth_call must
-          finish before an output appears here.
+          No browser-side answer is waiting underneath. A verified read-only
+          eth_call to the community MINI-4 processor must finish before an output
+          appears here.
         </p>
       ) : (
         <div className="telemetry__entries">
@@ -342,7 +357,10 @@ function EvidencePanel({ entries }: { entries: TelemetryEntry[] }) {
               key={`${entry.circuit}-${entry.evidence.blockNumber}-${entry.evidence.calldata}`}
             >
               <div className="telemetry-entry__topline">
-                <strong>{entry.circuit === "halfAdder" ? "HALF ADDER" : entry.circuit.toUpperCase()}</strong>
+                <strong>
+                  CIRCUIT ID #{CIRCUIT_IDS[entry.circuit]} /{" "}
+                  {entry.circuit === "halfAdder" ? "HALF ADDER" : entry.circuit.toUpperCase()}
+                </strong>
                 <span>{entry.evidence.durationMs} ms</span>
               </div>
               <dl>
@@ -351,9 +369,14 @@ function EvidencePanel({ entries }: { entries: TelemetryEntry[] }) {
                   <dd>{entry.evidence.blockNumber}</dd>
                 </div>
                 <div>
-                  <dt>CONTRACT</dt>
+                  <dt>PROCESSOR</dt>
                   <dd>
-                    <a href={entry.evidence.explorerUrl} target="_blank" rel="noreferrer">
+                    <a
+                      href={entry.evidence.explorerUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      aria-label={`Open MINI-4 processor ${entry.evidence.address} in the block explorer`}
+                    >
                       {shortAddress(entry.evidence.address)}
                     </a>
                   </dd>
@@ -428,6 +451,7 @@ export function Mini4Lab() {
 
   const ready =
     status?.status === "ready" &&
+    status.chain.id === 56 &&
     status.chain.online === true &&
     status.circuits.length === 5 &&
     status.circuits.every((circuit) => circuit.configured && circuit.address) &&
@@ -526,13 +550,13 @@ export function Mini4Lab() {
           <span className="wordmark__mark">M4</span>
           <span>
             <strong>MINI-4</strong>
-            <small>ON-CHAIN LOGIC INSTRUMENT</small>
+            <small>COMMUNITY ON-CHAIN PROCESSOR</small>
           </span>
         </a>
         <nav aria-label="Primary navigation">
           <a href="#calculator">Calculator</a>
           <a href="#logic-lab">Logic Lab</a>
-          <a href="#circuits">Circuits</a>
+          <a href="#circuits">Circuit IDs</a>
           <a href="https://github.com/tomandpeter/mini-4" target="_blank" rel="noreferrer">
             GitHub ↗
           </a>
@@ -541,19 +565,22 @@ export function Mini4Lab() {
 
       <section className="hero" id="top">
         <div className="hero__copy">
-          <p className="eyebrow">A DELIBERATELY TINY COMPUTER / BNB CHAIN</p>
+          <p className="eyebrow">COMMUNITY-BUILT PROCESSOR / BNB MAINNET</p>
           <h1>
             A calculator
             <span>built on-chain.</span>
           </h1>
           <p className="hero__lede">
-            Two switches. One bit. Five circuit interfaces. Every answer must
-            come back from contract bytecode—or it does not appear at all.
+            Built in public by the MINI-4 community: one processor contract,
+            five circuit IDs. Every answer must return from its bytecode through
+            read-only eth_call—or it does not appear at all.
           </p>
           <div className="hero__proof">
+            <span>ONE PROCESSOR</span>
+            <span>BNB MAINNET</span>
             <span>NO WALLET</span>
             <span>NO TRANSACTION</span>
-            <span>REAL ETH_CALL</span>
+            <span>READ-ONLY ETH_CALL</span>
           </div>
         </div>
         <StatusConsole
@@ -567,16 +594,16 @@ export function Mini4Lab() {
       <section className="instrument" id="calculator" aria-labelledby="calculator-title">
         <div className="instrument__rail" aria-hidden="true">
           <span />
-          <span>MINI-4 / UNIT 05</span>
+          <span>MINI-4 PROCESSOR / CIRCUIT ID 05</span>
           <span />
         </div>
         <div className="instrument__header">
           <div>
-            <p className="eyebrow">CIRCUIT #5 / 1-BIT HALF ADDER</p>
+            <p className="eyebrow">CIRCUIT ID #5 / 1-BIT HALF ADDER</p>
             <h2 id="calculator-title">The unnecessary on-chain calculator.</h2>
           </div>
           <div className="instrument__address">
-            <span>CONTRACT</span>
+            <span>COMMUNITY PROCESSOR</span>
             <strong>{shortAddress(circuitMap.get("halfAdder")?.address)}</strong>
           </div>
         </div>
@@ -616,7 +643,10 @@ export function Mini4Lab() {
               <span aria-hidden="true">→</span>
             </button>
             {!ready ? (
-              <p className="blocked-note">Enable only after all five contract endpoints pass configuration checks.</p>
+              <p className="blocked-note">
+                Enabled only after the MINI-4 processor, BNB mainnet RPC, and all
+                five circuit IDs pass configuration checks.
+              </p>
             ) : null}
           </div>
 
@@ -637,10 +667,14 @@ export function Mini4Lab() {
             </div>
             <p className="result-caption">
               {adderResult
-                ? `Computed by Circuit #5 at block ${adderResult.evidence.blockNumber}.`
+                ? `Returned by circuit ID #5 through the MINI-4 processor at block ${adderResult.evidence.blockNumber}.`
                 : "No result is precomputed in this interface."}
             </p>
-            {adderError ? <p className="error-message">{adderError}</p> : null}
+            {adderError ? (
+              <p className="error-message" role="alert">
+                {adderError}
+              </p>
+            ) : null}
           </div>
         </div>
       </section>
@@ -648,12 +682,12 @@ export function Mini4Lab() {
       <section className="logic-section" id="logic-lab" aria-labelledby="logic-title">
         <div className="section-heading">
           <div>
-            <p className="eyebrow">CIRCUITS #1–#4</p>
+            <p className="eyebrow">CIRCUIT IDS #1–#4</p>
             <h2 id="logic-title">Logic Lab</h2>
           </div>
           <p>
-            One pair of inputs, four independent contract reads. NOT uses A;
-            the other gates use A and B.
+            One pair of inputs, four circuit IDs, four read-only eth_calls to the
+            same community processor. NOT uses A; the other gates use A and B.
           </p>
         </div>
 
@@ -701,7 +735,7 @@ export function Mini4Lab() {
                   value={logicResults[circuit]?.outputs.result}
                   pending={logicPending}
                 />
-                <small>{shortAddress(circuitMap.get(circuit)?.address)}</small>
+                <small>PROCESSOR {shortAddress(circuitMap.get(circuit)?.address)}</small>
               </article>
             ))}
           </div>
@@ -718,12 +752,12 @@ export function Mini4Lab() {
       <section className="circuits-section" id="circuits" aria-labelledby="circuits-title">
         <div className="section-heading">
           <div>
-            <p className="eyebrow">THE CURRENT MACHINE</p>
-            <h2 id="circuits-title">Five circuit interfaces. No pretend results.</h2>
+            <p className="eyebrow">THE COMMUNITY MACHINE / BNB MAINNET</p>
+            <h2 id="circuits-title">One processor. Five circuit IDs.</h2>
           </div>
           <p>
-            MINI-4 exposes exactly what has been configured on-chain today—and
-            nothing from tomorrow&apos;s roadmap.
+            Created by the MINI-4 community, the processor exposes only the five
+            circuit IDs verified on-chain today—nothing from tomorrow&apos;s roadmap.
           </p>
         </div>
         <div className="circuit-ledger">
@@ -738,10 +772,12 @@ export function Mini4Lab() {
               <span className="circuit-ledger__number">#{circuit.number}</span>
               <div>
                 <strong>{circuit.label}</strong>
-                <small>{circuit.key === "halfAdder" ? "SUM + CARRY" : "1-BIT OUTPUT"}</small>
+                <small>
+                  PROCESSOR ROUTE · {circuit.key === "halfAdder" ? "SUM + CARRY" : "1-BIT OUTPUT"}
+                </small>
               </div>
               <span className={`circuit-state circuit-state--${circuit.configured ? "ready" : "blocked"}`}>
-                {circuit.configured ? "CONNECTED" : "UNCONFIGURED"}
+                {circuit.configured ? "ID READY" : "ID UNAVAILABLE"}
               </span>
             </article>
           ))}
@@ -750,20 +786,20 @@ export function Mini4Lab() {
 
       <section className="roadmap">
         <div>
-          <p className="eyebrow">NEXT / CIRCUIT #6+</p>
+          <p className="eyebrow">NEXT / COMMUNITY CIRCUIT IDS</p>
           <h2>8-bit arithmetic.</h2>
         </div>
         <p>
-          Addition from 0–255 comes only after an 8-bit adder is deployed and
-          verified. Multiplication waits for a multiplier. The interface will
-          grow when the machine does.
+          A 0–255 mode comes only after the community ships and verifies an
+          8-bit arithmetic circuit ID on-chain. Multiplication waits for its own
+          verified circuit ID. The interface grows only when the processor does.
         </p>
         <span className="roadmap__stamp">COMING ON-CHAIN</span>
       </section>
 
       <footer>
         <span>MINI-4 / ONE BIT AT A TIME</span>
-        <span>BNB CHAIN · READ-ONLY · OPEN SOURCE</span>
+        <span>COMMUNITY CREATED · BNB MAINNET · READ-ONLY ETH_CALL</span>
       </footer>
     </main>
   );

@@ -2,7 +2,35 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import { createServer } from "node:http";
 import test from "node:test";
-import { toFunctionSelector } from "viem";
+import {
+  decodeFunctionData,
+  encodeFunctionData,
+  encodeFunctionResult,
+  toHex,
+} from "viem";
+
+const PROCESSOR_ABI = [
+  {
+    type: "function",
+    name: "eval",
+    stateMutability: "view",
+    inputs: [
+      { name: "circuitId", type: "uint256" },
+      { name: "input", type: "bytes" },
+    ],
+    outputs: [{ name: "output", type: "bytes" }],
+  },
+];
+const PROCESSOR_ADDRESS = "0x6Eefc633e4E0cBDEe88919A48776a0Cc8b0D624C";
+const FIXED_BLOCK_NUMBER = 117_056_298;
+const FIXED_BLOCK_TAG = toHex(FIXED_BLOCK_NUMBER);
+const MOCK_PROXY_CODE = `0x${"60".repeat(295)}`;
+const PUBLIC_ENV_KEYS = [
+  "NEXT_PUBLIC_MINI4_CHAIN_ID",
+  "NEXT_PUBLIC_MINI4_RPC_URL",
+  "NEXT_PUBLIC_MINI4_EXPLORER_URL",
+  "NEXT_PUBLIC_MINI4_PROCESSOR_ADDRESS",
+];
 
 const workerUrl = new URL("../dist/server/index.js", import.meta.url);
 workerUrl.searchParams.set("chain-api-test", `${process.pid}-${Date.now()}`);
@@ -27,47 +55,157 @@ async function fetchApi(path, init) {
   );
 }
 
-test("reports a blocked status without pretending the chain is online", async () => {
-  const response = await fetchApi("/api/status");
-  assert.equal(response.status, 200);
-  assert.match(response.headers.get("content-type") ?? "", /^application\/json\b/i);
+async function withEnvironment(overrides, callback) {
+  const previous = Object.fromEntries(
+    PUBLIC_ENV_KEYS.map((key) => [key, process.env[key]]),
+  );
+  for (const key of PUBLIC_ENV_KEYS) delete process.env[key];
+  Object.assign(process.env, overrides);
 
-  const payload = await response.json();
-  assert.equal(payload.status, "blocked");
-  assert.equal(payload.chain.id, 56);
-  assert.equal(payload.chain.rpcConfigured, false);
-  assert.equal(payload.chain.online, null);
-  assert.equal("blockNumber" in payload, false);
-  assert.equal(payload.error.code, "CONFIGURATION_BLOCKED");
-  assert.deepEqual(
-    payload.circuits.map(({ key, number, configured }) => ({ key, number, configured })),
-    [
-      { key: "nand", number: 1, configured: false },
-      { key: "not", number: 2, configured: false },
-      { key: "and", number: 3, configured: false },
-      { key: "xor", number: 4, configured: false },
-      { key: "halfAdder", number: 5, configured: false },
-    ],
+  try {
+    return await callback();
+  } finally {
+    for (const key of PUBLIC_ENV_KEYS) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  }
+}
+
+async function postCalculation(circuit, inputs) {
+  return fetchApi("/api/calculate", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ circuit, inputs }),
+  });
+}
+
+async function startMockRpc({ code = MOCK_PROXY_CODE, resolveOutput }) {
+  const requests = [];
+  const state = { forcedOutput: undefined };
+  const server = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const rpcRequest = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    requests.push(rpcRequest);
+
+    let result;
+    if (rpcRequest.method === "eth_chainId") result = "0x38";
+    if (rpcRequest.method === "eth_blockNumber") result = FIXED_BLOCK_TAG;
+    if (rpcRequest.method === "eth_getCode") result = code;
+    if (rpcRequest.method === "eth_call") {
+      const decoded = decodeFunctionData({
+        abi: PROCESSOR_ABI,
+        data: rpcRequest.params[0].data,
+      });
+      const [circuitId, inputBytes] = decoded.args;
+      const output = state.forcedOutput ?? resolveOutput(Number(circuitId), inputBytes);
+      result = encodeFunctionResult({
+        abi: PROCESSOR_ABI,
+        functionName: "eval",
+        result: output,
+      });
+    }
+
+    response.writeHead(result === undefined ? 400 : 200, {
+      "content-type": "application/json",
+    });
+    response.end(
+      JSON.stringify(
+        result === undefined
+          ? {
+              jsonrpc: "2.0",
+              id: rpcRequest.id,
+              error: { code: -32601, message: "Method not found" },
+            }
+          : { jsonrpc: "2.0", id: rpcRequest.id, result },
+      ),
+    );
+  });
+
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+
+  return {
+    requests,
+    state,
+    url: `http://127.0.0.1:${address.port}`,
+    async close() {
+      server.close();
+      await once(server, "close");
+    },
+  };
+}
+
+function mockEnvironment(rpcUrl) {
+  return {
+    NEXT_PUBLIC_MINI4_CHAIN_ID: "56",
+    NEXT_PUBLIC_MINI4_RPC_URL: rpcUrl,
+    NEXT_PUBLIC_MINI4_EXPLORER_URL: "https://explorer.example",
+    NEXT_PUBLIC_MINI4_PROCESSOR_ADDRESS: PROCESSOR_ADDRESS,
+  };
+}
+
+test("blocks explicit missing configuration without claiming the chain is online", async () => {
+  await withEnvironment(
+    {
+      NEXT_PUBLIC_MINI4_CHAIN_ID: "56",
+      NEXT_PUBLIC_MINI4_RPC_URL: "",
+      NEXT_PUBLIC_MINI4_EXPLORER_URL: "https://bscscan.com",
+      NEXT_PUBLIC_MINI4_PROCESSOR_ADDRESS: "",
+    },
+    async () => {
+      const statusResponse = await fetchApi("/api/status");
+      assert.equal(statusResponse.status, 200);
+      const status = await statusResponse.json();
+      assert.equal(status.status, "blocked");
+      assert.equal(status.chain.id, 56);
+      assert.equal(status.chain.rpcConfigured, false);
+      assert.equal(status.chain.online, null);
+      assert.equal("blockNumber" in status, false);
+      assert.equal(status.error.code, "CONFIGURATION_BLOCKED");
+      assert.equal(status.circuits.length, 5);
+      assert.equal(status.circuits.every(({ configured }) => !configured), true);
+      assert.equal(status.circuits.every((circuit) => !("address" in circuit)), true);
+
+      const calculationResponse = await postCalculation("halfAdder", [1, 1]);
+      assert.equal(calculationResponse.status, 503);
+      const calculation = await calculationResponse.json();
+      assert.equal(calculation.ok, false);
+      assert.equal(calculation.error.code, "CONFIGURATION_BLOCKED");
+      assert.match(calculation.error.message, /local calculation is disabled/i);
+      assert.equal("outputs" in calculation, false);
+      assert.equal("evidence" in calculation, false);
+    },
   );
 });
 
-test("refuses to fabricate a half-adder result when contracts are not configured", async () => {
-  const response = await fetchApi("/api/calculate", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ circuit: "halfAdder", inputs: [1, 1] }),
-  });
-  assert.equal(response.status, 503);
+test("rejects non-mainnet configuration before any RPC call", async () => {
+  await withEnvironment(
+    {
+      NEXT_PUBLIC_MINI4_CHAIN_ID: "97",
+      NEXT_PUBLIC_MINI4_RPC_URL: "http://127.0.0.1:1",
+      NEXT_PUBLIC_MINI4_EXPLORER_URL: "https://testnet.bscscan.com",
+      NEXT_PUBLIC_MINI4_PROCESSOR_ADDRESS: PROCESSOR_ADDRESS,
+    },
+    async () => {
+      const statusResponse = await fetchApi("/api/status");
+      const status = await statusResponse.json();
+      assert.equal(status.status, "blocked");
+      assert.equal(status.chain.id, null);
+      assert.equal(status.chain.online, null);
+      assert.match(status.error.message, /CHAIN_ID must be 56/);
 
-  const payload = await response.json();
-  assert.equal(payload.ok, false);
-  assert.equal(payload.error.code, "CONFIGURATION_BLOCKED");
-  assert.match(payload.error.message, /local calculation is disabled/i);
-  assert.equal("outputs" in payload, false);
-  assert.equal("evidence" in payload, false);
+      const calculationResponse = await postCalculation("nand", [0, 0]);
+      assert.equal(calculationResponse.status, 503);
+      assert.equal((await calculationResponse.json()).error.code, "CONFIGURATION_BLOCKED");
+    },
+  );
 });
 
-test("rejects unsupported circuits and non-bit inputs before configuration checks", async (t) => {
+test("rejects unsupported circuits and non-bit inputs before chain access", async (t) => {
   const cases = [
     {
       name: "unknown circuit",
@@ -104,111 +242,175 @@ test("rejects unsupported circuits and non-bit inputs before configuration check
         body: JSON.stringify(testCase.body),
       });
       assert.equal(response.status, 400);
-      assert.deepEqual((await response.json()).error.code, testCase.code);
+      assert.equal((await response.json()).error.code, testCase.code);
     });
   }
 });
 
-test("returns half-adder display values only after a valid eth_call response", async () => {
-  const rpcRequests = [];
-  const zeroWord = "0".repeat(64);
-  const oneWord = `${"0".repeat(63)}1`;
-  const server = createServer(async (request, response) => {
-    const chunks = [];
-    for await (const chunk of request) chunks.push(chunk);
-    const rpcRequest = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-    rpcRequests.push(rpcRequest);
-
-    const results = {
-      eth_chainId: "0x38",
-      eth_blockNumber: "0x1234",
-      eth_call: `0x${zeroWord}${oneWord}`,
-    };
-    const result = results[rpcRequest.method];
-    response.writeHead(result ? 200 : 400, { "content-type": "application/json" });
-    response.end(
-      JSON.stringify(
-        result
-          ? { jsonrpc: "2.0", id: rpcRequest.id, result }
-          : {
-              jsonrpc: "2.0",
-              id: rpcRequest.id,
-              error: { code: -32601, message: "Method not found" },
-            },
-      ),
-    );
+test("uses one deployed processor for the complete verified truth table", async () => {
+  const truthTables = {
+    1: [1, 1, 1, 0],
+    2: [1, 0],
+    3: [0, 0, 0, 1],
+    4: [0, 1, 1, 0],
+    5: [0, 1, 1, 2],
+  };
+  const circuits = [
+    { key: "nand", id: 1 },
+    { key: "not", id: 2 },
+    { key: "and", id: 3 },
+    { key: "xor", id: 4 },
+    { key: "halfAdder", id: 5 },
+  ];
+  const rpc = await startMockRpc({
+    resolveOutput(circuitId, inputBytes) {
+      const output = truthTables[circuitId]?.[Number.parseInt(inputBytes.slice(2), 16)];
+      assert.notEqual(output, undefined, "mock received an unsupported circuit/input");
+      return toHex(output, { size: 1 });
+    },
   });
 
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
-  const address = server.address();
-  assert.ok(address && typeof address === "object");
-
-  const configuredEnvironment = {
-    NEXT_PUBLIC_MINI4_CHAIN_ID: "56",
-    NEXT_PUBLIC_MINI4_RPC_URL: `http://127.0.0.1:${address.port}`,
-    NEXT_PUBLIC_MINI4_EXPLORER_URL: "https://explorer.example",
-    NEXT_PUBLIC_MINI4_NAND_ADDRESS: "0x1111111111111111111111111111111111111111",
-    NEXT_PUBLIC_MINI4_NOT_ADDRESS: "0x1111111111111111111111111111111111111111",
-    NEXT_PUBLIC_MINI4_AND_ADDRESS: "0x1111111111111111111111111111111111111111",
-    NEXT_PUBLIC_MINI4_XOR_ADDRESS: "0x1111111111111111111111111111111111111111",
-    NEXT_PUBLIC_MINI4_HALF_ADDER_ADDRESS: "0x1111111111111111111111111111111111111111",
-    NEXT_PUBLIC_MINI4_HALF_ADDER_SIGNATURE: "sumBits(uint8,bool)",
-  };
-  const previousEnvironment = Object.fromEntries(
-    Object.keys(configuredEnvironment).map((key) => [key, process.env[key]]),
-  );
-
-  Object.assign(process.env, configuredEnvironment);
   try {
-    const statusResponse = await fetchApi("/api/status");
-    assert.equal(statusResponse.status, 200);
-    const statusPayload = await statusResponse.json();
-    assert.equal(statusPayload.status, "ready");
-    assert.equal(statusPayload.chain.online, true);
-    assert.equal(statusPayload.blockNumber, "4660");
-    assert.equal(statusPayload.circuits.every(({ configured }) => configured), true);
+    await withEnvironment(mockEnvironment(rpc.url), async () => {
+      const statusResponse = await fetchApi("/api/status");
+      assert.equal(statusResponse.status, 200);
+      const status = await statusResponse.json();
+      assert.equal(status.status, "ready");
+      assert.equal(status.chain.id, 56);
+      assert.equal(status.chain.online, true);
+      assert.equal(status.blockNumber, String(FIXED_BLOCK_NUMBER));
+      assert.equal(status.circuits.every(({ configured }) => configured), true);
+      assert.deepEqual(
+        [...new Set(status.circuits.map(({ address }) => address))],
+        [PROCESSOR_ADDRESS],
+      );
 
-    const response = await fetchApi("/api/calculate", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ circuit: "halfAdder", inputs: [1, 1] }),
+      for (const circuit of circuits) {
+        const table = truthTables[circuit.id];
+        for (let packedInput = 0; packedInput < table.length; packedInput += 1) {
+          const inputs =
+            circuit.key === "not"
+              ? [packedInput & 1]
+              : [packedInput & 1, (packedInput >> 1) & 1];
+          const response = await postCalculation(circuit.key, inputs);
+          assert.equal(response.status, 200, `${circuit.key} input ${packedInput}`);
+          const payload = await response.json();
+          const expectedByte = table[packedInput];
+
+          assert.equal(payload.ok, true);
+          assert.deepEqual(payload.inputs, inputs);
+          if (circuit.key === "halfAdder") {
+            assert.deepEqual(payload.outputs, {
+              sum: expectedByte & 1,
+              carry: (expectedByte >> 1) & 1,
+              binary: `${(expectedByte >> 1) & 1}${expectedByte & 1}`,
+              decimal: expectedByte,
+            });
+          } else {
+            assert.deepEqual(payload.outputs, { result: expectedByte });
+          }
+
+          const expectedCalldata = encodeFunctionData({
+            abi: PROCESSOR_ABI,
+            functionName: "eval",
+            args: [BigInt(circuit.id), toHex(packedInput, { size: 1 })],
+          });
+          const expectedRawResult = encodeFunctionResult({
+            abi: PROCESSOR_ABI,
+            functionName: "eval",
+            result: toHex(expectedByte, { size: 1 }),
+          });
+          assert.equal(payload.evidence.chainId, 56);
+          assert.equal(payload.evidence.blockNumber, String(FIXED_BLOCK_NUMBER));
+          assert.equal(payload.evidence.address, PROCESSOR_ADDRESS);
+          assert.equal(payload.evidence.calldata, expectedCalldata);
+          assert.equal(payload.evidence.rawResult, expectedRawResult);
+          assert.equal(
+            payload.evidence.explorerUrl,
+            `https://explorer.example/address/${PROCESSOR_ADDRESS}`,
+          );
+        }
+      }
+
+      const codeRequests = rpc.requests.filter(({ method }) => method === "eth_getCode");
+      const callRequests = rpc.requests.filter(({ method }) => method === "eth_call");
+      assert.equal(codeRequests.length, 19);
+      assert.equal(callRequests.length, 18);
+      assert.equal(
+        codeRequests.every(({ params }) => params[1] === FIXED_BLOCK_TAG),
+        true,
+      );
+      assert.equal(
+        callRequests.every(({ params }) => params[1] === FIXED_BLOCK_TAG),
+        true,
+      );
+      assert.equal(
+        callRequests.every(({ params }) => params[0].to === PROCESSOR_ADDRESS),
+        true,
+      );
     });
-    assert.equal(response.status, 200);
-
-    const payload = await response.json();
-    assert.equal(payload.ok, true);
-    assert.deepEqual(payload.inputs, [1, 1]);
-    assert.deepEqual(payload.outputs, {
-      sum: 0,
-      carry: 1,
-      binary: "10",
-      decimal: 2,
-    });
-    assert.equal(payload.evidence.chainId, 56);
-    assert.equal(payload.evidence.blockNumber, "4660");
-    assert.equal(
-      payload.evidence.explorerUrl,
-      "https://explorer.example/address/0x1111111111111111111111111111111111111111",
-    );
-    assert.equal(payload.evidence.rawResult, `0x${zeroWord}${oneWord}`);
-
-    const callRequest = rpcRequests.find(({ method }) => method === "eth_call");
-    assert.ok(callRequest, "expected an eth_call request");
-    assert.equal(callRequest.params[1], "0x1234");
-    assert.equal(callRequest.params[0].to, configuredEnvironment.NEXT_PUBLIC_MINI4_HALF_ADDER_ADDRESS);
-    assert.equal(
-      callRequest.params[0].data,
-      `${toFunctionSelector("sumBits(uint8,bool)")}${oneWord}${oneWord}`,
-    );
-    assert.equal(payload.evidence.calldata, callRequest.params[0].data);
   } finally {
-    for (const key of Object.keys(configuredEnvironment)) {
-      const previousValue = previousEnvironment[key];
-      if (previousValue === undefined) delete process.env[key];
-      else process.env[key] = previousValue;
-    }
-    server.close();
-    await once(server, "close");
+    await rpc.close();
+  }
+});
+
+test("rejects non-single-byte and unused-bit processor outputs", async () => {
+  const rpc = await startMockRpc({
+    resolveOutput() {
+      return "0x00";
+    },
+  });
+
+  try {
+    await withEnvironment(mockEnvironment(rpc.url), async () => {
+      const cases = [
+        { circuit: "nand", inputs: [0, 0], output: "0x0001" },
+        { circuit: "xor", inputs: [1, 0], output: "0x02" },
+        { circuit: "halfAdder", inputs: [1, 1], output: "0x04" },
+        { circuit: "halfAdder", inputs: [1, 1], output: "0x03" },
+      ];
+
+      for (const testCase of cases) {
+        rpc.state.forcedOutput = testCase.output;
+        const response = await postCalculation(testCase.circuit, testCase.inputs);
+        assert.equal(response.status, 502);
+        const payload = await response.json();
+        assert.equal(payload.ok, false);
+        assert.equal(payload.error.code, "INVALID_CONTRACT_RESPONSE");
+        assert.equal("outputs" in payload, false);
+        assert.equal("evidence" in payload, false);
+      }
+    });
+  } finally {
+    await rpc.close();
+  }
+});
+
+test("does not report ready or call eval when the processor address has no code", async () => {
+  const rpc = await startMockRpc({
+    code: "0x",
+    resolveOutput() {
+      return "0x00";
+    },
+  });
+
+  try {
+    await withEnvironment(mockEnvironment(rpc.url), async () => {
+      const statusResponse = await fetchApi("/api/status");
+      const status = await statusResponse.json();
+      assert.equal(status.status, "degraded");
+      assert.equal(status.chain.online, false);
+      assert.equal(status.error.code, "PROCESSOR_CODE_MISSING");
+      assert.equal(status.circuits.every(({ configured }) => configured), true);
+
+      const response = await postCalculation("halfAdder", [1, 1]);
+      assert.equal(response.status, 502);
+      const payload = await response.json();
+      assert.equal(payload.error.code, "PROCESSOR_CODE_MISSING");
+      assert.equal("outputs" in payload, false);
+      assert.equal(rpc.requests.some(({ method }) => method === "eth_call"), false);
+    });
+  } finally {
+    await rpc.close();
   }
 });

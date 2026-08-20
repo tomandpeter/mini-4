@@ -1,9 +1,10 @@
 import {
-  concatHex,
   createPublicClient,
-  encodeAbiParameters,
+  decodeFunctionResult,
+  encodeFunctionData,
+  encodeFunctionResult,
   http,
-  toFunctionSelector,
+  toHex,
   type Address,
   type Hex,
 } from "viem";
@@ -13,10 +14,22 @@ import {
   getMini4Config,
   type CircuitConfig,
   type CircuitKey,
-  type CircuitParameterType,
   type Mini4Config,
   type SupportedChainId,
 } from "@/lib/mini4-config";
+
+const PROCESSOR_ABI = [
+  {
+    type: "function",
+    name: "eval",
+    stateMutability: "view",
+    inputs: [
+      { name: "circuitId", type: "uint256" },
+      { name: "input", type: "bytes" },
+    ],
+    outputs: [{ name: "output", type: "bytes" }],
+  },
+] as const;
 
 export type Bit = 0 | 1;
 
@@ -121,87 +134,83 @@ export function parseCalculationInput(value: unknown): CalculationInput {
   };
 }
 
-function encodeBit(parameterType: CircuitParameterType, bit: Bit): Hex {
-  if (parameterType === "bool") {
-    return encodeAbiParameters([{ type: "bool" }], [bit === 1]);
-  }
-
-  return encodeAbiParameters([{ type: "uint8" }], [bit]);
+function packInputBits(inputs: readonly Bit[]): Hex {
+  const packed = inputs[0] | ((inputs[1] ?? 0) << 1);
+  return toHex(packed, { size: 1 });
 }
 
-function encodeCalldata(circuit: CircuitConfig, inputs: readonly Bit[]): Hex {
-  if (!circuit.parsedSignature) {
-    throw new Mini4Error(
-      "CONFIGURATION_BLOCKED",
-      `${circuit.label} function signature is not configured correctly.`,
-      503,
-    );
-  }
-
-  const selector = toFunctionSelector(circuit.parsedSignature.canonical);
-  const words = circuit.parsedSignature.parameterTypes.map((parameterType, index) =>
-    encodeBit(parameterType, inputs[index]),
-  );
-  return concatHex([selector, ...words]);
+function encodeProcessorCalldata(circuit: CircuitConfig, inputs: readonly Bit[]): Hex {
+  return encodeFunctionData({
+    abi: PROCESSOR_ABI,
+    functionName: "eval",
+    args: [BigInt(circuit.number), packInputBits(inputs)],
+  });
 }
 
-function decodeBitWord(word: string): Bit {
-  const value = BigInt(`0x${word}`);
-  if (value !== BigInt(0) && value !== BigInt(1)) {
-    throw new Mini4Error(
-      "INVALID_CONTRACT_RESPONSE",
-      "The contract returned a value other than 0 or 1.",
-      502,
-    );
-  }
-  return Number(value) as Bit;
+function invalidContractResponse(message: string): Mini4Error {
+  return new Mini4Error("INVALID_CONTRACT_RESPONSE", message, 502);
 }
 
-function decodeOutputs(circuit: CircuitKey, rawResult: unknown): { rawResult: Hex; outputs: CircuitOutputs } {
-  const wordCount = circuit === "halfAdder" ? 2 : 1;
-  const expectedHexLength = 2 + wordCount * 64;
-
+function decodeProcessorOutput(
+  circuit: CircuitKey,
+  rawResult: unknown,
+): { rawResult: Hex; outputs: CircuitOutputs } {
   if (
     typeof rawResult !== "string" ||
-    rawResult.length !== expectedHexLength ||
-    !/^0x[0-9a-fA-F]+$/.test(rawResult)
+    !/^0x(?:[0-9a-fA-F]{2})+$/.test(rawResult)
   ) {
-    throw new Mini4Error(
-      "INVALID_CONTRACT_RESPONSE",
-      `The contract must return exactly ${wordCount} ABI word${wordCount === 1 ? "" : "s"}.`,
-      502,
-    );
+    throw invalidContractResponse("The processor returned malformed ABI data.");
   }
 
-  const words = Array.from({ length: wordCount }, (_, index) =>
-    rawResult.slice(2 + index * 64, 2 + (index + 1) * 64),
-  );
+  const encodedResult = rawResult as Hex;
+  let outputBytes: Hex;
+  try {
+    outputBytes = decodeFunctionResult({
+      abi: PROCESSOR_ABI,
+      functionName: "eval",
+      data: encodedResult,
+    });
+  } catch {
+    throw invalidContractResponse("The processor returned invalid bytes ABI data.");
+  }
 
+  if (!/^0x[0-9a-fA-F]{2}$/.test(outputBytes)) {
+    throw invalidContractResponse("The processor output must contain exactly one byte.");
+  }
+
+  const canonicalResult = encodeFunctionResult({
+    abi: PROCESSOR_ABI,
+    functionName: "eval",
+    result: outputBytes,
+  });
+  if (canonicalResult.toLowerCase() !== encodedResult.toLowerCase()) {
+    throw invalidContractResponse("The processor returned non-canonical bytes ABI data.");
+  }
+
+  const outputByte = Number.parseInt(outputBytes.slice(2), 16);
   if (circuit !== "halfAdder") {
+    if ((outputByte & 0xfe) !== 0) {
+      throw invalidContractResponse("The processor set unused scalar output bits.");
+    }
     return {
-      rawResult: rawResult as Hex,
-      outputs: { result: decodeBitWord(words[0]) },
+      rawResult: encodedResult,
+      outputs: { result: outputByte as Bit },
     };
   }
 
-  const sum = decodeBitWord(words[0]);
-  const carry = decodeBitWord(words[1]);
-  if (sum === 1 && carry === 1) {
-    throw new Mini4Error(
-      "INVALID_CONTRACT_RESPONSE",
-      "The half adder returned an impossible SUM/CARRY combination.",
-      502,
-    );
+  if ((outputByte & 0xfc) !== 0 || outputByte === 3) {
+    throw invalidContractResponse("The processor returned an invalid half-adder output byte.");
   }
-  const decimal = (carry * 2 + sum) as 0 | 1 | 2;
 
+  const sum = (outputByte & 1) as Bit;
+  const carry = ((outputByte >> 1) & 1) as Bit;
   return {
-    rawResult: rawResult as Hex,
+    rawResult: encodedResult,
     outputs: {
       sum,
       carry,
       binary: `${carry}${sum}` as HalfAdderOutputs["binary"],
-      decimal,
+      decimal: outputByte as HalfAdderOutputs["decimal"],
     },
   };
 }
@@ -209,11 +218,12 @@ function decodeOutputs(circuit: CircuitKey, rawResult: unknown): { rawResult: He
 function requireChainConfiguration(config: Mini4Config): {
   chainId: SupportedChainId;
   rpcUrl: string;
+  processorAddress: Address;
 } {
-  if (!config.chain.supported || config.chain.id === null) {
+  if (!config.chain.supported || config.chain.id !== 56) {
     throw new Mini4Error(
       "CONFIGURATION_BLOCKED",
-      "NEXT_PUBLIC_MINI4_CHAIN_ID must be 56 or 97.",
+      "NEXT_PUBLIC_MINI4_CHAIN_ID must be 56.",
       503,
     );
   }
@@ -224,8 +234,26 @@ function requireChainConfiguration(config: Mini4Config): {
       503,
     );
   }
+  if (!config.processor.address || !config.processor.configured) {
+    throw new Mini4Error(
+      "CONFIGURATION_BLOCKED",
+      "NEXT_PUBLIC_MINI4_PROCESSOR_ADDRESS is required; local calculation is disabled.",
+      503,
+    );
+  }
+  if (config.blockers.length > 0) {
+    throw new Mini4Error(
+      "CONFIGURATION_BLOCKED",
+      "The public MINI-4 chain configuration is invalid; local calculation is disabled.",
+      503,
+    );
+  }
 
-  return { chainId: config.chain.id, rpcUrl: config.chain.rpcUrl };
+  return {
+    chainId: config.chain.id,
+    rpcUrl: config.chain.rpcUrl,
+    processorAddress: config.processor.address,
+  };
 }
 
 function makeClient(rpcUrl: string) {
@@ -237,7 +265,11 @@ function makeClient(rpcUrl: string) {
   });
 }
 
-async function readChainHead(chainId: SupportedChainId, rpcUrl: string) {
+async function readProcessorAtChainHead(
+  chainId: SupportedChainId,
+  rpcUrl: string,
+  processorAddress: Address,
+) {
   const client = makeClient(rpcUrl);
   let actualChainId: number;
   let blockNumber: bigint;
@@ -263,6 +295,28 @@ async function readChainHead(chainId: SupportedChainId, rpcUrl: string) {
     );
   }
 
+  let bytecode: Hex | undefined;
+  try {
+    bytecode = await client.getCode({
+      address: processorAddress,
+      blockNumber,
+    });
+  } catch {
+    throw new Mini4Error(
+      "RPC_UNAVAILABLE",
+      "The processor bytecode could not be read from the configured BNB RPC endpoint.",
+      502,
+    );
+  }
+
+  if (!bytecode || bytecode === "0x") {
+    throw new Mini4Error(
+      "PROCESSOR_CODE_MISSING",
+      "The configured processor address has no bytecode at the fixed block.",
+      502,
+    );
+  }
+
   return { client, blockNumber };
 }
 
@@ -271,8 +325,12 @@ export async function probeMini4Chain(): Promise<{
   blockNumber: string;
 }> {
   const config = getMini4Config();
-  const { chainId, rpcUrl } = requireChainConfiguration(config);
-  const { blockNumber } = await readChainHead(chainId, rpcUrl);
+  const { chainId, rpcUrl, processorAddress } = requireChainConfiguration(config);
+  const { blockNumber } = await readProcessorAtChainHead(
+    chainId,
+    rpcUrl,
+    processorAddress,
+  );
   return { chainId, blockNumber: blockNumber.toString() };
 }
 
@@ -289,9 +347,13 @@ export async function calculateOnChain(input: CalculationInput): Promise<Calcula
     );
   }
 
-  const { chainId, rpcUrl } = requireChainConfiguration(config);
-  const calldata = encodeCalldata(circuit, input.inputs);
-  const { client, blockNumber } = await readChainHead(chainId, rpcUrl);
+  const { chainId, rpcUrl, processorAddress } = requireChainConfiguration(config);
+  const calldata = encodeProcessorCalldata(circuit, input.inputs);
+  const { client, blockNumber } = await readProcessorAtChainHead(
+    chainId,
+    rpcUrl,
+    processorAddress,
+  );
   const blockTag = `0x${blockNumber.toString(16)}` as Hex;
   let rpcResult: unknown;
 
@@ -300,7 +362,7 @@ export async function calculateOnChain(input: CalculationInput): Promise<Calcula
       method: "eth_call",
       params: [
         {
-          to: circuit.address,
+          to: processorAddress,
           data: calldata,
         },
         blockTag,
@@ -314,7 +376,7 @@ export async function calculateOnChain(input: CalculationInput): Promise<Calcula
     );
   }
 
-  const decoded = decodeOutputs(input.circuit, rpcResult);
+  const decoded = decodeProcessorOutput(input.circuit, rpcResult);
 
   return {
     ok: true,
@@ -324,10 +386,10 @@ export async function calculateOnChain(input: CalculationInput): Promise<Calcula
     evidence: {
       chainId,
       blockNumber: blockNumber.toString(),
-      address: circuit.address,
+      address: processorAddress,
       calldata,
       rawResult: decoded.rawResult,
-      explorerUrl: `${config.chain.explorerBaseUrl}/address/${circuit.address}`,
+      explorerUrl: `${config.chain.explorerBaseUrl}/address/${processorAddress}`,
       durationMs: Date.now() - startedAt,
     },
   };

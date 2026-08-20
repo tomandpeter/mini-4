@@ -34,7 +34,7 @@ test("server-renders the MINI-4 product instead of the starter", async () => {
   assert.match(html, /ADD ON-CHAIN/);
   assert.match(html, /Logic Lab/);
   assert.match(html, /No result is precomputed in this interface\./);
-  assert.match(html, /CHECKING CHAIN/);
+  assert.match(html, /CHECKING PROCESSOR/);
   assert.match(html, /aria-live="polite"/);
   assert.match(html, /<button[^>]+disabled[^>]*>[^<]*<span>ADD ON-CHAIN<\/span>/i);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Your site is taking shape/);
