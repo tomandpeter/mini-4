@@ -5,10 +5,11 @@ export const CIRCUIT_KEYS = [
   "not",
   "and",
   "xor",
-  "halfAdder",
+  "adder8",
 ] as const;
 
 export type CircuitKey = (typeof CIRCUIT_KEYS)[number];
+export type CircuitStatusKey = CircuitKey | "halfAdder";
 export type SupportedChainId = 56;
 
 const DEFAULT_CHAIN_ID = "56";
@@ -17,10 +18,10 @@ const DEFAULT_EXPLORER_URL = "https://bscscan.com";
 const DEFAULT_PROCESSOR_ADDRESS = "0x6Eefc633e4E0cBDEe88919A48776a0Cc8b0D624C";
 
 interface CircuitDefinition {
-  key: CircuitKey;
-  number: 1 | 2 | 3 | 4 | 5;
+  key: CircuitStatusKey;
+  number: 1 | 2 | 3 | 4 | 5 | 6;
   label: string;
-  inputCount: 1 | 2;
+  inputCount: 1 | 2 | 16;
 }
 
 export interface CircuitConfig extends CircuitDefinition {
@@ -43,7 +44,7 @@ export interface Mini4Config {
     configured: boolean;
     error?: string;
   };
-  circuits: Record<CircuitKey, CircuitConfig>;
+  circuits: Record<CircuitStatusKey, CircuitConfig>;
   blockers: readonly string[];
 }
 
@@ -53,6 +54,7 @@ const circuitDefinitions: readonly CircuitDefinition[] = [
   { key: "and", number: 3, label: "AND", inputCount: 2 },
   { key: "xor", number: 4, label: "XOR", inputCount: 2 },
   { key: "halfAdder", number: 5, label: "Half Adder", inputCount: 2 },
+  { key: "adder8", number: 6, label: "8-bit Adder", inputCount: 16 },
 ];
 
 function readRawEnvironment() {
@@ -120,7 +122,10 @@ export function getMini4Config(): Mini4Config {
       ...(processorError ? { error: processorError } : {}),
     },
   ] as const);
-  const circuits = Object.fromEntries(circuitEntries) as Record<CircuitKey, CircuitConfig>;
+  const circuits = Object.fromEntries(circuitEntries) as Record<
+    CircuitStatusKey,
+    CircuitConfig
+  >;
   const blockers: string[] = [];
 
   if (chainId === null) {

@@ -2,7 +2,7 @@
   "name": "mini-4",
   "version": "0.1.0",
   "private": true,
-  "description": "An honest 1-bit calculator powered by read-only BNB Chain contract calls.",
+  "description": "An honest 0–255 calculator powered by MINI-4 Circuit #6 on BNB Chain.",
   "license": "MIT",
   "repository": {
     "type": "git",

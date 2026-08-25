@@ -3,7 +3,9 @@ import {
   decodeFunctionResult,
   encodeFunctionData,
   encodeFunctionResult,
+  isAddressEqual,
   http,
+  keccak256,
   toHex,
   type Address,
   type Hex,
@@ -17,39 +19,46 @@ import {
   type Mini4Config,
   type SupportedChainId,
 } from "@/lib/mini4-config";
+import {
+  ADDER8_CIRCUIT_ID,
+  ADDER8_INPUTS,
+  ADDER8_NAND_COUNT,
+  ADDER8_NETLIST_KECCAK256,
+  ADDER8_OUTPUTS,
+  BEACON_ABI,
+  EIP1967_BEACON_SLOT,
+  MINI4_BEACON,
+  MINI4_CREATOR,
+  MINI4_IMPLEMENTATION,
+  MINI4_PROCESSOR,
+  MINI4_PROXY_CODE_HASH,
+  PROCESSOR_TAPEOUT_ABI,
+  addressFromStorageWord,
+  decodeAdder8Output,
+  packAdder8Inputs,
+} from "@/lib/adder8-tapeout";
 
-const PROCESSOR_ABI = [
-  {
-    type: "function",
-    name: "eval",
-    stateMutability: "view",
-    inputs: [
-      { name: "circuitId", type: "uint256" },
-      { name: "input", type: "bytes" },
-    ],
-    outputs: [{ name: "output", type: "bytes" }],
-  },
-] as const;
+const PROCESSOR_ABI = PROCESSOR_TAPEOUT_ABI;
 
 export type Bit = 0 | 1;
 
 export interface CalculationInput {
   circuit: CircuitKey;
-  inputs: readonly Bit[];
+  inputs: readonly number[];
 }
 
 export interface ScalarOutputs {
   result: Bit;
 }
 
-export interface HalfAdderOutputs {
-  sum: Bit;
+export interface Adder8Outputs {
+  result: number;
+  low: number;
   carry: Bit;
-  binary: "00" | "01" | "10";
-  decimal: 0 | 1 | 2;
+  binary: string;
 }
 
-export type CircuitOutputs = ScalarOutputs | HalfAdderOutputs;
+export type CircuitOutputs = ScalarOutputs | Adder8Outputs;
 
 export interface CalculationEvidence {
   chainId: SupportedChainId;
@@ -64,7 +73,7 @@ export interface CalculationEvidence {
 export interface CalculationSuccess {
   ok: true;
   circuit: CircuitKey;
-  inputs: readonly Bit[];
+  inputs: readonly number[];
   outputs: CircuitOutputs;
   evidence: CalculationEvidence;
 }
@@ -93,6 +102,15 @@ function isBit(value: unknown): value is Bit {
   return value === 0 || value === 1;
 }
 
+function isByte(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= 0 &&
+    value <= 255
+  );
+}
+
 export function parseCalculationInput(value: unknown): CalculationInput {
   if (!isPlainObject(value)) {
     throw new Mini4Error("INVALID_REQUEST", "Request body must be a JSON object.", 400);
@@ -110,13 +128,24 @@ export function parseCalculationInput(value: unknown): CalculationInput {
   if (!isCircuitKey(value.circuit)) {
     throw new Mini4Error(
       "INVALID_CIRCUIT",
-      "circuit must be nand, not, and, xor, or halfAdder.",
+      "circuit must be nand, not, and, xor, or adder8.",
       400,
     );
   }
 
   if (!Array.isArray(value.inputs)) {
-    throw new Mini4Error("INVALID_INPUT", "inputs must be an array of 0/1 bits.", 400);
+    throw new Mini4Error("INVALID_INPUT", "inputs must be an array of numbers.", 400);
+  }
+
+  if (value.circuit === "adder8") {
+    if (value.inputs.length !== 2 || !value.inputs.every(isByte)) {
+      throw new Mini4Error(
+        "INVALID_INPUT",
+        "adder8 requires exactly two integer operands from 0 to 255.",
+        400,
+      );
+    }
+    return { circuit: value.circuit, inputs: value.inputs };
   }
 
   const expectedCount = value.circuit === "not" ? 1 : 2;
@@ -130,7 +159,7 @@ export function parseCalculationInput(value: unknown): CalculationInput {
 
   return {
     circuit: value.circuit,
-    inputs: value.inputs as Bit[],
+    inputs: value.inputs,
   };
 }
 
@@ -139,11 +168,15 @@ function packInputBits(inputs: readonly Bit[]): Hex {
   return toHex(packed, { size: 1 });
 }
 
-function encodeProcessorCalldata(circuit: CircuitConfig, inputs: readonly Bit[]): Hex {
+function encodeProcessorCalldata(circuit: CircuitConfig, inputs: readonly number[]): Hex {
+  const packedInput =
+    circuit.key === "adder8"
+      ? packAdder8Inputs(inputs[0], inputs[1])
+      : packInputBits(inputs as readonly Bit[]);
   return encodeFunctionData({
     abi: PROCESSOR_ABI,
     functionName: "eval",
-    args: [BigInt(circuit.number), packInputBits(inputs)],
+    args: [BigInt(circuit.number), packedInput],
   });
 }
 
@@ -174,10 +207,6 @@ function decodeProcessorOutput(
     throw invalidContractResponse("The processor returned invalid bytes ABI data.");
   }
 
-  if (!/^0x[0-9a-fA-F]{2}$/.test(outputBytes)) {
-    throw invalidContractResponse("The processor output must contain exactly one byte.");
-  }
-
   const canonicalResult = encodeFunctionResult({
     abi: PROCESSOR_ABI,
     functionName: "eval",
@@ -187,31 +216,36 @@ function decodeProcessorOutput(
     throw invalidContractResponse("The processor returned non-canonical bytes ABI data.");
   }
 
-  const outputByte = Number.parseInt(outputBytes.slice(2), 16);
-  if (circuit !== "halfAdder") {
-    if ((outputByte & 0xfe) !== 0) {
-      throw invalidContractResponse("The processor set unused scalar output bits.");
+  if (circuit === "adder8") {
+    let result: number;
+    try {
+      result = decodeAdder8Output(outputBytes);
+    } catch (error) {
+      throw invalidContractResponse(
+        error instanceof Error ? error.message : "The 8-bit adder output is invalid.",
+      );
     }
     return {
       rawResult: encodedResult,
-      outputs: { result: outputByte as Bit },
+      outputs: {
+        result,
+        low: result & 0xff,
+        carry: ((result >> 8) & 1) as Bit,
+        binary: result.toString(2).padStart(9, "0"),
+      },
     };
   }
 
-  if ((outputByte & 0xfc) !== 0 || outputByte === 3) {
-    throw invalidContractResponse("The processor returned an invalid half-adder output byte.");
+  if (!/^0x[0-9a-fA-F]{2}$/.test(outputBytes)) {
+    throw invalidContractResponse("The scalar processor output must contain exactly one byte.");
   }
-
-  const sum = (outputByte & 1) as Bit;
-  const carry = ((outputByte >> 1) & 1) as Bit;
+  const outputByte = Number.parseInt(outputBytes.slice(2), 16);
+  if ((outputByte & 0xfe) !== 0) {
+    throw invalidContractResponse("The processor set unused scalar output bits.");
+  }
   return {
     rawResult: encodedResult,
-    outputs: {
-      sum,
-      carry,
-      binary: `${carry}${sum}` as HalfAdderOutputs["binary"],
-      decimal: outputByte as HalfAdderOutputs["decimal"],
-    },
+    outputs: { result: outputByte as Bit },
   };
 }
 
@@ -295,6 +329,14 @@ async function readProcessorAtChainHead(
     );
   }
 
+  if (!isAddressEqual(processorAddress, MINI4_PROCESSOR)) {
+    throw new Mini4Error(
+      "PROCESSOR_MISMATCH",
+      "The configured processor address is not the pinned MINI-4 processor.",
+      502,
+    );
+  }
+
   let bytecode: Hex | undefined;
   try {
     bytecode = await client.getCode({
@@ -313,6 +355,102 @@ async function readProcessorAtChainHead(
     throw new Mini4Error(
       "PROCESSOR_CODE_MISSING",
       "The configured processor address has no bytecode at the fixed block.",
+      502,
+    );
+  }
+
+  if (keccak256(bytecode) !== MINI4_PROXY_CODE_HASH) {
+    throw new Mini4Error(
+      "PROCESSOR_CODE_MISMATCH",
+      "The MINI-4 proxy bytecode changed; calculation is paused for review.",
+      502,
+    );
+  }
+
+  let beaconWord: Hex | undefined;
+  let circuitInfo: readonly [number, number, number, number];
+  let circuitOwner: Address;
+  let circuitNetlist: Hex;
+  try {
+    [beaconWord, circuitInfo, circuitOwner, circuitNetlist] = await Promise.all([
+      client.getStorageAt({
+        address: processorAddress,
+        slot: EIP1967_BEACON_SLOT,
+        blockNumber,
+      }),
+      client.readContract({
+        address: processorAddress,
+        abi: PROCESSOR_ABI,
+        functionName: "circuitInfo",
+        args: [ADDER8_CIRCUIT_ID],
+        blockNumber,
+      }),
+      client.readContract({
+        address: processorAddress,
+        abi: PROCESSOR_ABI,
+        functionName: "ownerOf",
+        args: [ADDER8_CIRCUIT_ID],
+        blockNumber,
+      }),
+      client.readContract({
+        address: processorAddress,
+        abi: PROCESSOR_ABI,
+        functionName: "netlist",
+        args: [ADDER8_CIRCUIT_ID],
+        blockNumber,
+      }),
+    ]);
+  } catch {
+    throw new Mini4Error(
+      "CIRCUIT_VERIFICATION_FAILED",
+      "Circuit #6 could not be verified at the fixed BNB Chain block.",
+      502,
+    );
+  }
+
+  const beacon = addressFromStorageWord(beaconWord);
+  if (!beacon || !isAddressEqual(beacon, MINI4_BEACON)) {
+    throw new Mini4Error(
+      "BEACON_MISMATCH",
+      "The MINI-4 beacon changed; calculation is paused for review.",
+      502,
+    );
+  }
+
+  let implementation: Address;
+  try {
+    implementation = await client.readContract({
+      address: beacon,
+      abi: BEACON_ABI,
+      functionName: "implementation",
+      blockNumber,
+    });
+  } catch {
+    throw new Mini4Error(
+      "IMPLEMENTATION_UNAVAILABLE",
+      "The MINI-4 implementation could not be verified at the fixed block.",
+      502,
+    );
+  }
+  if (!isAddressEqual(implementation, MINI4_IMPLEMENTATION)) {
+    throw new Mini4Error(
+      "IMPLEMENTATION_MISMATCH",
+      "The MINI-4 implementation changed; calculation is paused for review.",
+      502,
+    );
+  }
+
+  if (
+    circuitInfo[0] !== ADDER8_INPUTS ||
+    circuitInfo[1] !== ADDER8_OUTPUTS ||
+    circuitInfo[2] !== 0 ||
+    circuitInfo[3] !== Number(ADDER8_NAND_COUNT) ||
+    !isAddressEqual(circuitOwner, MINI4_CREATOR) ||
+    keccak256(circuitNetlist) !== ADDER8_NETLIST_KECCAK256
+  ) {
+    throw new Mini4Error(
+      "CIRCUIT_MISMATCH",
+      "Circuit #6 metadata, owner, or netlist does not match the verified 8-bit adder.",
       502,
     );
   }

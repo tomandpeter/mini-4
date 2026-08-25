@@ -5,7 +5,7 @@ import "./globals.css";
 
 const title = "MINI-4 — A Calculator Built On-Chain";
 const description =
-  "A decimal-style 1-bit calculator that returns verified NAND, NOT, AND, XOR, SUM, and CARRY results through read-only BNB Chain calls.";
+  "An 8-bit calculator that returns verified 0–510 addition results from Circuit #6, plus NAND, NOT, AND, and XOR through read-only BNB Chain calls.";
 
 export async function generateMetadata(): Promise<Metadata> {
   const requestHeaders = await headers();
@@ -17,7 +17,7 @@ export async function generateMetadata(): Promise<Metadata> {
   const metadataBase = new URL(
     host ? `${protocol}://${host}` : "http://localhost:3000",
   );
-  const imageUrl = new URL("/og.png", metadataBase).toString();
+  const imageUrl = new URL("/og-v2.png", metadataBase).toString();
 
   return {
     metadataBase,
@@ -37,7 +37,7 @@ export async function generateMetadata(): Promise<Metadata> {
           url: imageUrl,
           width: 1536,
           height: 1024,
-          alt: "MINI-4 decimal-style 1-bit on-chain calculator",
+          alt: "MINI-4 decimal 8-bit on-chain calculator powered by Circuit #6",
         },
       ],
     },

@@ -9,7 +9,8 @@ import {
 } from "react";
 
 type Bit = 0 | 1;
-type CircuitKey = "nand" | "not" | "and" | "xor" | "halfAdder";
+type LogicCircuitKey = "nand" | "not" | "and" | "xor";
+type CircuitKey = LogicCircuitKey | "halfAdder" | "adder8";
 type SiteState = "ready" | "blocked" | "degraded";
 type ActiveOperand = "A" | "B";
 
@@ -47,7 +48,7 @@ type Evidence = {
 
 type ScalarSuccess = {
   ok: true;
-  circuit: Exclude<CircuitKey, "halfAdder">;
+  circuit: LogicCircuitKey;
   inputs: Bit[];
   outputs: { result: Bit };
   evidence: Evidence;
@@ -66,10 +67,21 @@ type HalfAdderSuccess = {
   evidence: Evidence;
 };
 
-type CalculationSuccess = ScalarSuccess | HalfAdderSuccess;
-type LogicResult = Partial<
-  Record<Exclude<CircuitKey, "halfAdder">, ScalarSuccess>
->;
+type Adder8Success = {
+  ok: true;
+  circuit: "adder8";
+  inputs: number[];
+  outputs: {
+    result: number;
+    low: number;
+    carry: Bit;
+    binary: string;
+  };
+  evidence: Evidence;
+};
+
+type CalculationSuccess = ScalarSuccess | HalfAdderSuccess | Adder8Success;
+type LogicResult = Partial<Record<LogicCircuitKey, ScalarSuccess>>;
 
 type TelemetryEntry = {
   circuit: CircuitKey;
@@ -77,12 +89,21 @@ type TelemetryEntry = {
 };
 
 const LOGIC_CIRCUITS = ["nand", "not", "and", "xor"] as const;
+const REQUIRED_CIRCUITS: readonly [CircuitKey, number][] = [
+  ["nand", 1],
+  ["not", 2],
+  ["and", 3],
+  ["xor", 4],
+  ["halfAdder", 5],
+  ["adder8", 6],
+];
 const CIRCUIT_IDS: Record<CircuitKey, number> = {
   nand: 1,
   not: 2,
   and: 3,
   xor: 4,
   halfAdder: 5,
+  adder8: 6,
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -91,6 +112,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isBit(value: unknown): value is Bit {
   return value === 0 || value === 1;
+}
+
+function isIntegerBetween(value: unknown, minimum: number, maximum: number) {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= minimum &&
+    value <= maximum
+  );
+}
+
+function parseAdder8Input(value: string): number | null {
+  if (!/^\d{1,3}$/.test(value)) return null;
+  const parsed = Number(value);
+  return isIntegerBetween(parsed, 0, 255) ? parsed : null;
 }
 
 function hasValidEvidence(value: unknown): value is Evidence {
@@ -117,7 +153,7 @@ function hasValidEvidence(value: unknown): value is Evidence {
 function isCalculationSuccessFor(
   value: unknown,
   circuit: CircuitKey,
-  inputs: Bit[],
+  inputs: number[],
 ): value is CalculationSuccess {
   if (
     !isRecord(value) ||
@@ -132,17 +168,30 @@ function isCalculationSuccessFor(
     return false;
   }
 
-  if (circuit !== "halfAdder") {
+  if (LOGIC_CIRCUITS.includes(circuit as LogicCircuitKey)) {
     return isBit(value.outputs.result);
   }
 
-  const { sum, carry, binary, decimal } = value.outputs;
+  if (circuit === "halfAdder") {
+    const { sum, carry, binary, decimal } = value.outputs;
+    return (
+      isBit(sum) &&
+      isBit(carry) &&
+      ((sum === 0 && carry === 0 && binary === "00" && decimal === 0) ||
+        (sum === 1 && carry === 0 && binary === "01" && decimal === 1) ||
+        (sum === 0 && carry === 1 && binary === "10" && decimal === 2))
+    );
+  }
+
+  const { result, low, carry, binary } = value.outputs;
   return (
-    isBit(sum) &&
+    isIntegerBetween(result, 0, 510) &&
+    isIntegerBetween(low, 0, 255) &&
     isBit(carry) &&
-    ((sum === 0 && carry === 0 && binary === "00" && decimal === 0) ||
-      (sum === 1 && carry === 0 && binary === "01" && decimal === 1) ||
-      (sum === 0 && carry === 1 && binary === "10" && decimal === 2))
+    typeof binary === "string" &&
+    /^[01]{9}$/.test(binary) &&
+    result === (low | (carry << 8)) &&
+    binary === result.toString(2).padStart(9, "0")
   );
 }
 
@@ -181,7 +230,7 @@ function errorMessage(payload: unknown, fallback: string): string {
 
 async function calculate(
   circuit: CircuitKey,
-  inputs: Bit[],
+  inputs: number[],
 ): Promise<CalculationSuccess> {
   const response = await fetch("/api/calculate", {
     method: "POST",
@@ -323,8 +372,8 @@ function StatusConsole({
           <dt>CIRCUIT IDS</dt>
           <dd>
             {status?.status === "ready"
-              ? `${status.circuits.filter((item) => item.configured).length}/5`
-              : "0/5"}
+              ? `${status.circuits.filter((item) => item.configured).length}/${status.circuits.length}`
+              : `0/${status?.circuits.length ?? 6}`}
           </dd>
         </div>
       </dl>
@@ -368,7 +417,11 @@ function EvidencePanel({ entries }: { entries: TelemetryEntry[] }) {
               <div className="telemetry-entry__topline">
                 <strong>
                   CIRCUIT ID #{CIRCUIT_IDS[entry.circuit]} /{" "}
-                  {entry.circuit === "halfAdder" ? "HALF ADDER" : entry.circuit.toUpperCase()}
+                  {entry.circuit === "halfAdder"
+                    ? "HALF ADDER"
+                    : entry.circuit === "adder8"
+                      ? "8-BIT ADDER"
+                      : entry.circuit.toUpperCase()}
                 </strong>
                 <span>{entry.evidence.durationMs} ms</span>
               </div>
@@ -411,11 +464,11 @@ export function Mini4Lab() {
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [statusLoading, setStatusLoading] = useState(true);
   const [statusError, setStatusError] = useState<string | null>(null);
-  const [adderA, setAdderA] = useState<Bit>(0);
-  const [adderB, setAdderB] = useState<Bit>(0);
+  const [adderAInput, setAdderAInput] = useState("0");
+  const [adderBInput, setAdderBInput] = useState("0");
   const [activeOperand, setActiveOperand] = useState<ActiveOperand>("A");
   const [adderPending, setAdderPending] = useState(false);
-  const [adderResult, setAdderResult] = useState<HalfAdderSuccess | null>(null);
+  const [adderResult, setAdderResult] = useState<Adder8Success | null>(null);
   const [adderError, setAdderError] = useState<string | null>(null);
   const [logicA, setLogicA] = useState<Bit>(1);
   const [logicB, setLogicB] = useState<Bit>(0);
@@ -459,18 +512,23 @@ export function Mini4Lab() {
     };
   }, []);
 
-  const ready =
-    status?.status === "ready" &&
-    status.chain.id === 56 &&
-    status.chain.online === true &&
-    status.circuits.length === 5 &&
-    status.circuits.every((circuit) => circuit.configured && circuit.address) &&
-    !statusLoading &&
-    !statusError;
   const circuitMap = useMemo(
     () => new Map(status?.circuits.map((circuit) => [circuit.key, circuit]) ?? []),
     [status],
   );
+  const ready =
+    status?.status === "ready" &&
+    status.chain.id === 56 &&
+    status.chain.online === true &&
+    REQUIRED_CIRCUITS.every(([key, number]) => {
+      const circuit = circuitMap.get(key);
+      return circuit?.number === number && circuit.configured && circuit.address;
+    }) &&
+    !statusLoading &&
+    !statusError;
+  const adderA = parseAdder8Input(adderAInput);
+  const adderB = parseAdder8Input(adderBInput);
+  const adderInputsValid = adderA !== null && adderB !== null;
 
   const clearAdder = () => {
     setAdderResult(null);
@@ -478,13 +536,13 @@ export function Mini4Lab() {
   };
 
   const runAdder = async () => {
-    if (!ready || adderPending) return;
+    if (!ready || adderPending || !adderInputsValid) return;
     setAdderPending(true);
     setAdderError(null);
     setAdderResult(null);
     try {
-      const result = await calculate("halfAdder", [adderA, adderB]);
-      if (result.circuit !== "halfAdder") {
+      const result = await calculate("adder8", [adderA, adderB]);
+      if (result.circuit !== "adder8") {
         throw new Error("The server returned the wrong circuit result.");
       }
       setAdderResult(result);
@@ -494,17 +552,29 @@ export function Mini4Lab() {
       ].slice(0, 5));
     } catch (error) {
       setAdderError(
-        error instanceof Error ? error.message : "The on-chain half adder failed.",
+        error instanceof Error ? error.message : "The on-chain 8-bit adder failed.",
       );
     } finally {
       setAdderPending(false);
     }
   };
 
-  const enterCalculatorBit = (bit: Bit) => {
+  const updateAdderInput = (operand: ActiveOperand, value: string) => {
     if (adderPending) return;
-    if (activeOperand === "A") setAdderA(bit);
-    else setAdderB(bit);
+    if (value !== "" && !/^\d{1,3}$/.test(value)) return;
+    if (operand === "A") setAdderAInput(value);
+    else setAdderBInput(value);
+    setActiveOperand(operand);
+    clearAdder();
+  };
+
+  const enterCalculatorDigit = (digit: number) => {
+    if (adderPending) return;
+    const current = activeOperand === "A" ? adderAInput : adderBInput;
+    const next = current === "0" || current === "" ? String(digit) : `${current}${digit}`;
+    if (parseAdder8Input(next) === null) return;
+    if (activeOperand === "A") setAdderAInput(next);
+    else setAdderBInput(next);
     clearAdder();
   };
 
@@ -516,8 +586,8 @@ export function Mini4Lab() {
 
   const resetCalculator = () => {
     if (adderPending) return;
-    setAdderA(0);
-    setAdderB(0);
+    setAdderAInput("0");
+    setAdderBInput("0");
     setActiveOperand("A");
     clearAdder();
   };
@@ -528,18 +598,22 @@ export function Mini4Lab() {
     if (event.altKey || event.ctrlKey || event.metaKey) return;
     const nestedControl =
       event.target instanceof HTMLElement
-        ? event.target.closest("button, a")
+        ? event.target.closest("button, a, input")
         : null;
     if (
       nestedControl instanceof HTMLAnchorElement ||
+      nestedControl instanceof HTMLButtonElement ||
       nestedControl?.classList.contains("text-button")
     ) {
       return;
     }
 
-    if (event.key === "0" || event.key === "1") {
+    const inputHasFocus = nestedControl instanceof HTMLInputElement;
+    if (inputHasFocus && /^\d$/.test(event.key)) return;
+
+    if (/^\d$/.test(event.key)) {
       event.preventDefault();
-      enterCalculatorBit(Number(event.key) as Bit);
+      enterCalculatorDigit(Number(event.key));
       return;
     }
     if (event.key === "+") {
@@ -574,7 +648,7 @@ export function Mini4Lab() {
         LOGIC_CIRCUITS.map(async (circuit) => {
           const inputs: Bit[] = circuit === "not" ? [logicA] : [logicA, logicB];
           const result = await calculate(circuit, inputs);
-          if (result.circuit === "halfAdder") {
+          if (result.circuit === "halfAdder" || result.circuit === "adder8") {
             throw new Error("The server returned the wrong circuit result.");
           }
           return result;
@@ -632,14 +706,14 @@ export function Mini4Lab() {
 
       <section className="hero" id="top" aria-labelledby="page-title">
         <div className="hero__copy">
-          <p className="eyebrow">ONE BIT / ONE PROCESSOR / BNB MAINNET</p>
+          <p className="eyebrow">EIGHT BITS / ONE PROCESSOR / BNB MAINNET</p>
           <h1 id="page-title">
             A calculator
             <span>built on-chain.</span>
           </h1>
           <p className="hero__lede">
-            Enter 0 or 1. MINI-4 asks a community-built processor for the answer
-            and shows nothing if the chain cannot verify it.
+            Enter two values from 0 to 255. MINI-4 asks Circuit #6 for the
+            answer and shows nothing if the chain cannot verify it.
           </p>
           <div className="hero__proof">
             <span>NO WALLET</span>
@@ -663,7 +737,7 @@ export function Mini4Lab() {
             </div>
             <div className="mode-badge">
               <span aria-hidden="true" />
-              1-BIT MODE
+              8-BIT MODE
             </div>
           </header>
 
@@ -674,43 +748,72 @@ export function Mini4Lab() {
             aria-busy={adderPending}
           >
             <div className="calculator-display__topline">
-              <span>DECIMAL / CIRCUIT ID #5</span>
+              <span>DECIMAL / CIRCUIT ID #6</span>
               <span>{adderPending ? "READING BNB MAINNET…" : "READY FOR INPUT"}</span>
             </div>
-            <div className="calculator-expression" aria-label={`Expression: ${adderA} plus ${adderB}`}>
-              <button
+            <div
+              className="calculator-expression"
+              aria-label={`Expression: ${adderA ?? "invalid"} plus ${adderB ?? "invalid"}`}
+            >
+              <label
                 className={`operand ${activeOperand === "A" ? "operand--active" : ""}`}
-                type="button"
-                aria-pressed={activeOperand === "A"}
-                disabled={adderPending}
-                onClick={() => setActiveOperand("A")}
               >
-                <small>A</small>
-                <strong>{adderA}</strong>
-              </button>
+                <small>A / 0–255</small>
+                <input
+                  type="number"
+                  min="0"
+                  max="255"
+                  step="1"
+                  inputMode="numeric"
+                  aria-label="Operand A, 0 to 255"
+                  aria-invalid={adderA === null}
+                  disabled={adderPending}
+                  value={adderAInput}
+                  onFocus={() => setActiveOperand("A")}
+                  onChange={(event) => updateAdderInput("A", event.target.value)}
+                />
+              </label>
               <span aria-hidden="true">+</span>
-              <button
+              <label
                 className={`operand ${activeOperand === "B" ? "operand--active" : ""}`}
-                type="button"
-                aria-pressed={activeOperand === "B"}
-                disabled={adderPending}
-                onClick={() => setActiveOperand("B")}
               >
-                <small>B</small>
-                <strong>{adderB}</strong>
-              </button>
+                <small>B / 0–255</small>
+                <input
+                  type="number"
+                  min="0"
+                  max="255"
+                  step="1"
+                  inputMode="numeric"
+                  aria-label="Operand B, 0 to 255"
+                  aria-invalid={adderB === null}
+                  disabled={adderPending}
+                  value={adderBInput}
+                  onFocus={() => setActiveOperand("B")}
+                  onChange={(event) => updateAdderInput("B", event.target.value)}
+                />
+              </label>
               <span aria-hidden="true">=</span>
               <div className="calculator-decimal">
                 <small>CHAIN RESULT</small>
-                <strong>{adderPending ? "…" : (adderResult?.outputs.decimal ?? "—")}</strong>
+                <strong>{adderPending ? "…" : (adderResult?.outputs.result ?? "—")}</strong>
               </div>
             </div>
           </div>
 
           <div className="calculator-signals">
-            <SignalLamp label="SUM" value={adderResult?.outputs.sum} pending={adderPending} />
-            <SignalLamp label="CARRY" value={adderResult?.outputs.carry} pending={adderPending} />
-            <div className="calculator-signals__mode">
+            <div className="calculator-signals__metric">
+              <span>LOW BYTE</span>
+              <strong>{adderPending ? "…" : (adderResult?.outputs.low ?? "—")}</strong>
+            </div>
+            <div className="calculator-signals__metric">
+              <span>CARRY BIT</span>
+              <strong>{adderPending ? "…" : (adderResult?.outputs.carry ?? "—")}</strong>
+            </div>
+            <div className="calculator-signals__metric calculator-signals__metric--binary">
+              <span>9-BIT BINARY</span>
+              <strong>{adderPending ? "…" : (adderResult?.outputs.binary ?? "—")}</strong>
+            </div>
+            <div className="calculator-signals__metric">
               <span>ACTIVE INPUT</span>
               <strong>{activeOperand}</strong>
             </div>
@@ -723,9 +826,9 @@ export function Mini4Lab() {
                   className={`calculator-key calculator-key--${digit}`}
                   type="button"
                   key={digit}
-                  disabled
-                  aria-describedby="future-keys-note"
-                  aria-label={`${digit}, unavailable until a future 8-bit adder`}
+                  disabled={adderPending}
+                  aria-label={`Enter ${digit} in operand ${activeOperand}`}
+                  onClick={() => enterCalculatorDigit(digit)}
                 >
                   {digit}
                 </button>
@@ -752,8 +855,8 @@ export function Mini4Lab() {
                 className="calculator-key calculator-key--1"
                 type="button"
                 disabled={adderPending}
-                aria-label={`Set operand ${activeOperand} to 1`}
-                onClick={() => enterCalculatorBit(1)}
+                aria-label={`Enter 1 in operand ${activeOperand}`}
+                onClick={() => enterCalculatorDigit(1)}
               >
                 1
               </button>
@@ -762,9 +865,9 @@ export function Mini4Lab() {
                   className={`calculator-key calculator-key--${digit}`}
                   type="button"
                   key={digit}
-                  disabled
-                  aria-describedby="future-keys-note"
-                  aria-label={`${digit}, unavailable until a future 8-bit adder`}
+                  disabled={adderPending}
+                  aria-label={`Enter ${digit} in operand ${activeOperand}`}
+                  onClick={() => enterCalculatorDigit(digit)}
                 >
                   {digit}
                 </button>
@@ -773,15 +876,15 @@ export function Mini4Lab() {
                 className="calculator-key calculator-key--0"
                 type="button"
                 disabled={adderPending}
-                aria-label={`Set operand ${activeOperand} to 0`}
-                onClick={() => enterCalculatorBit(0)}
+                aria-label={`Enter 0 in operand ${activeOperand}`}
+                onClick={() => enterCalculatorDigit(0)}
               >
                 0
               </button>
               <button
                 className="calculator-key calculator-key--equals"
                 type="button"
-                disabled={!ready || adderPending}
+                disabled={!ready || adderPending || !adderInputsValid}
                 aria-label="Equals, calculate on-chain"
                 onClick={() => void runAdder()}
               >
@@ -798,24 +901,27 @@ export function Mini4Lab() {
                 onRetry={() => void refreshStatus()}
               />
               <p className="calculator-help" id="calculator-help">
-                Select A or B, then press 0 or 1. Press + to move to B. Only =
-                ON-CHAIN asks the processor for a result.
+                Enter A and B from 0–255, or select an input and use the keypad.
+                Press + to move to B. Only = ON-CHAIN asks Circuit #6 for a result.
               </p>
               <p className="keyboard-help" id="keyboard-help">
-                Keyboard: 0 / 1 / + / Enter / Escape
+                Keyboard: 0–9 / + / Enter / Escape
               </p>
             </div>
           </div>
 
           <div className="calculator-footer">
-            <p id="future-keys-note">
-              Keys 2–9 are disabled. They need a future 8-bit adder.
-            </p>
+            <p>INPUT 0–255 · VERIFIED RESULT 0–510 · CIRCUIT ID #6</p>
             <p className="result-caption">
               {adderResult
-                ? `Verified at block ${adderResult.evidence.blockNumber}. Decimal, SUM, and CARRY came from the processor response.`
+                ? `Verified at block ${adderResult.evidence.blockNumber}. Decimal result, low byte, carry bit, and ${adderResult.outputs.binary} binary came from the processor response.`
                 : "No chain result yet. This screen never substitutes browser arithmetic."}
             </p>
+            {!adderInputsValid ? (
+              <p className="error-message" role="alert">
+                Both inputs must be whole numbers from 0 to 255.
+              </p>
+            ) : null}
             {!ready ? (
               <p className="blocked-note" id="calculator-blocked-note">
                 On-chain equals stays disabled until the processor and BNB mainnet
@@ -853,11 +959,11 @@ export function Mini4Lab() {
           </article>
           <article className="comparison-card--mini4">
             <span>MINI-4 TODAY</span>
-            <h3>One-bit and verifiable.</h3>
+            <h3>Eight-bit and verifiable.</h3>
             <p>
-              Adds only 0 or 1 through a slower read-only eth_call, then exposes
-              the processor address, block, calldata, and raw result. No wallet,
-              transaction, or gas is required.
+              Adds two values from 0–255 through a slower read-only eth_call and
+              returns 0–510, then exposes the processor address, block, calldata,
+              and raw result. No wallet, transaction, or gas is required.
             </p>
           </article>
         </div>
@@ -942,10 +1048,10 @@ export function Mini4Lab() {
         <div className="section-heading">
           <div>
             <p className="eyebrow">THE COMMUNITY MACHINE / BNB MAINNET</p>
-            <h2 id="circuits-title">One processor. Five circuit IDs.</h2>
+            <h2 id="circuits-title">One processor. Six circuit IDs.</h2>
           </div>
           <p>
-            Created by the MINI-4 community, the processor exposes only the five
+            Created by the MINI-4 community, the processor exposes only the six
             circuit IDs verified on-chain today—nothing from tomorrow&apos;s roadmap.
           </p>
         </div>
@@ -956,13 +1062,19 @@ export function Mini4Lab() {
             { key: "and", number: 3, label: "AND", configured: false },
             { key: "xor", number: 4, label: "XOR", configured: false },
             { key: "halfAdder", number: 5, label: "HALF ADDER", configured: false },
+            { key: "adder8", number: 6, label: "8-BIT ADDER", configured: false },
           ] satisfies CircuitStatus[]).map((circuit) => (
             <article key={circuit.key}>
               <span className="circuit-ledger__number">#{circuit.number}</span>
               <div>
                 <strong>{circuit.label}</strong>
                 <small>
-                  PROCESSOR ROUTE · {circuit.key === "halfAdder" ? "SUM + CARRY" : "1-BIT OUTPUT"}
+                  PROCESSOR ROUTE ·{" "}
+                  {circuit.key === "halfAdder"
+                    ? "SUM + CARRY"
+                    : circuit.key === "adder8"
+                      ? "0–510 DECIMAL"
+                      : "1-BIT OUTPUT"}
                 </small>
               </div>
               <span className={`circuit-state circuit-state--${ready && circuit.configured ? "ready" : "blocked"}`}>
@@ -975,19 +1087,19 @@ export function Mini4Lab() {
 
       <section className="roadmap">
         <div>
-          <p className="eyebrow">NEXT / COMMUNITY CIRCUIT IDS</p>
-          <h2>8-bit arithmetic.</h2>
+          <p className="eyebrow">LIVE / CIRCUIT ID #6</p>
+          <h2>8-bit addition is live.</h2>
         </div>
         <p>
-          A 0–255 mode comes only after the community ships and verifies an
-          8-bit arithmetic circuit ID on-chain. Multiplication waits for its own
-          verified circuit ID. The interface grows only when the processor does.
+          Circuit #6 accepts two 8-bit inputs and returns a verified 9-bit result.
+          Multiplication still waits for its own verified circuit ID. The
+          interface grows only when the processor does.
         </p>
-        <span className="roadmap__stamp">COMING ON-CHAIN</span>
+        <span className="roadmap__stamp">LIVE ON-CHAIN</span>
       </section>
 
       <footer>
-        <span>MINI-4 / ONE BIT AT A TIME</span>
+        <span>MINI-4 / EIGHT BITS AT A TIME</span>
         <span>COMMUNITY CREATED · BNB MAINNET · READ-ONLY ETH_CALL</span>
       </footer>
     </main>

@@ -1,10 +1,10 @@
 # MINI-4
 
-**A Calculator Built On-Chain — one bit at a time.**
+**A Calculator Built On-Chain — now adding 0–255.**
 
 MINI-4 is a small, honest interface for experimenting with a deployed logic
 processor on BNB Smart Chain mainnet. The current version exposes NAND, NOT,
-AND, XOR, and a 1-bit half adder through one processor contract.
+AND, XOR, and an 8-bit adder through one processor contract.
 
 The repository also contains a lightweight [PoD Shadow Miner](miner/README.md)
 for an always-on VPS. It watches public TapeOut tasks and protocol publication
@@ -25,7 +25,8 @@ calculator fails closed instead of presenting a fabricated result.
 
 ## Verified BNB mainnet processor
 
-MINI-4 uses one processor for all five circuit IDs:
+MINI-4 uses one processor for all six permanent circuit IDs. The public lab
+actively calls logic Circuits `#1`–`#4` and the 8-bit adder at Circuit `#6`:
 
 | Property | Value |
 | --- | --- |
@@ -34,16 +35,20 @@ MINI-4 uses one processor for all five circuit IDs:
 | Processor | [`0x6Eefc633e4E0cBDEe88919A48776a0Cc8b0D624C`](https://bscscan.com/address/0x6Eefc633e4E0cBDEe88919A48776a0Cc8b0D624C) |
 | Read ABI | `eval(uint256,bytes) returns(bytes)` |
 
-A live read on 2026-08-20 confirmed code at this address and returned `0x02`
-for `eval(5, 0x03)`, the packed result of `1 + 1`.
+Transaction [`0x969e…134df`](https://bscscan.com/tx/0x969e2f513d19b815f60f3c6f711eb3ff1fbe7f83a6f00e955397973beb1134df)
+created Circuit `#6` at BNB block `118027330`. Its fixed metadata is 16 input
+bits, 9 output bits, 0 state bits, and 68 NAND gates. The stored 476-byte
+netlist has Keccak-256
+`0x288a84a20d5e02e007179e97f7137375b5c8ebb7465f618ab84f054fe5570e60`.
 
-The processor address currently contains beacon-proxy bytecode rather than an
-immutable implementation. At BNB block `117056298`, its beacon
+The processor address contains beacon-proxy bytecode rather than an immutable
+implementation. At the Circuit `#6` verification block, its beacon
 `0xf8d6d8eb894d6971c8976ad8b4971cbefe028156` resolved to implementation
-`0xb9e2f952b67c54f28a8fae544ce5a15ba31761de`; the beacon also exposes an
-owner and an `upgradeTo(address)` route. The website therefore records the
-block used for every result and describes behavior as verified on-chain, not as
-unchangeable forever.
+`0xb9e2f952b67c54f28a8fae544ce5a15ba31761de`. The website pins the proxy
+bytecode, beacon, implementation, Circuit `#6` metadata, owner, and netlist hash
+at the same block used for every calculation. Any mismatch pauses calculation
+for review; this is verified behavior, not a claim that the beacon can never be
+upgraded.
 
 This processor/CPU is **community-created**. It is not an official “Genesis
 CPU,” and this repository does not represent it as one. This project also makes
@@ -59,6 +64,7 @@ investment value.
 | `3` | AND | A, B | bit 0 = result |
 | `4` | XOR | A, B | bit 0 = result |
 | `5` | Half adder | A, B | bit 0 = `SUM`, bit 1 = `CARRY` |
+| `6` | 8-bit adder | A bits 0–7, B bits 0–7 | low result byte, then carry bit |
 
 Inputs and outputs use little-endian bit packing: bit 0 is the least-significant
 bit. For two-input circuits, pack `A` into bit 0 and `B` into bit 1:
@@ -68,37 +74,30 @@ packed input = A | (B << 1)
 ```
 
 The returned `bytes` use the same ordering. Circuits 1–4 return their result in
-bit 0. Circuit 5 returns `SUM` in bit 0 and `CARRY` in bit 1.
+bit 0. Circuit 5 returns `SUM` in bit 0 and `CARRY` in bit 1. Circuit 6 takes
+two bytes as `0xAABB`: the first byte contains A bits 0–7 and the second contains
+B bits 0–7. Its output is `0xLLCC`, where `LL` is the low eight result bits and
+bit 0 of `CC` is the carry bit.
 
-For `A = 1` and `B = 1`:
+For `A = 123` and `B = 77`:
 
 ```text
-input  = 0b00000011 = 0x03
-output = 0b00000010 = 0x02
-
-SUM   = output bit 0 = 0
-CARRY = output bit 1 = 1
-binary result         = 10
-decimal result        = 2
+input          = 0x7b4d
+output         = 0xc800
+low byte       = 0xc8 = 200
+carry byte     = 0x00
+decimal result = 200
 ```
 
 ## Current arithmetic limit
 
-The **only arithmetic operation currently available** is Circuit ID `5`, a
-1-bit half adder. Its two inputs, `A` and `B`, must each be either `0` or `1`.
-The complete arithmetic range is therefore:
+The active arithmetic operation is Circuit ID `6`, an 8-bit adder without a
+carry-in. A and B must each be integers from `0` to `255`; the verified result
+range is `0` to `510`. The earlier 1-bit half adder remains permanently stored
+as Circuit `#5`, but the public calculator now routes addition to Circuit `#6`.
 
-| A | B | SUM | CARRY | Decimal result |
-| ---: | ---: | ---: | ---: | ---: |
-| `0` | `0` | `0` | `0` | `0` |
-| `0` | `1` | `1` | `0` | `1` |
-| `1` | `0` | `1` | `0` | `1` |
-| `1` | `1` | `0` | `1` | `2` |
-
-That means the only possible decimal results are `0`, `1`, and `2`. This half
-adder has **no carry-in**. MINI-4 cannot currently perform multi-bit addition,
-subtraction, multiplication, or division. Circuit IDs `1`–`4` are individual
-logic gates, not additional general-purpose arithmetic operations.
+MINI-4 still cannot subtract, multiply, or divide. Circuit IDs `1`–`4` are
+individual logic gates, not additional general-purpose arithmetic operations.
 
 ## MINI-4 vs ordinary calculator
 
@@ -108,7 +107,7 @@ logic gates, not additional general-purpose arithmetic operations.
 | Execution type | Local software operation | Read-only `eth_call` |
 | Transaction or consensus | None | The call is not mined, submitted as a transaction, or executed by consensus |
 | Wallet and gas | Not required | Not required |
-| Speed and range | Fast, flexible, and useful for everyday arithmetic | Slower because of RPC latency and currently limited to the circuits above |
+| Speed and range | Fast, flexible, and useful for everyday arithmetic | Slower because of RPC latency; addition is currently limited to two 8-bit operands |
 | Evidence | Usually just the displayed result | Can record processor address, block number, calldata, and raw return bytes |
 | Purpose | Practical calculation | Education, inspection, and reproducible verification of deployed logic |
 
@@ -133,15 +132,15 @@ This is a provider-only read; no private key or wallet flag is needed.
 cast call \
   0x6Eefc633e4E0cBDEe88919A48776a0Cc8b0D624C \
   "eval(uint256,bytes)(bytes)" \
-  5 \
-  0x03 \
+  6 \
+  0x7b4d \
   --rpc-url https://bsc-dataseed.binance.org
 ```
 
 Expected decoded return:
 
 ```text
-0x02
+0xc800
 ```
 
 ### ethers v6
@@ -167,19 +166,17 @@ const processor = new Contract(
   provider,
 );
 
-const circuitId = 5n;
-const A = 1;
-const B = 1;
-const input = hexlify(Uint8Array.of(A | (B << 1))); // 0x03
+const circuitId = 6n;
+const A = 123;
+const B = 77;
+const input = hexlify(Uint8Array.of(A, B)); // 0x7b4d
 
 const rawOutput = await processor.eval(circuitId, input);
-const [packedOutput = 0] = getBytes(rawOutput);
+const [low = 0, carryByte = 0] = getBytes(rawOutput);
+const result = low | ((carryByte & 1) << 8);
 
-const sum = packedOutput & 1;
-const carry = (packedOutput >> 1) & 1;
-
-console.log({ rawOutput, sum, carry });
-// { rawOutput: "0x02", sum: 0, carry: 1 }
+console.log({ rawOutput, result });
+// { rawOutput: "0xc800", result: 200 }
 ```
 
 The `Contract` has a provider but no signer, so this code can only perform the
@@ -197,9 +194,11 @@ overridden at build/deployment time:
 | `NEXT_PUBLIC_MINI4_EXPLORER_URL` | `https://bscscan.com` | Explorer base URL |
 | `NEXT_PUBLIC_MINI4_PROCESSOR_ADDRESS` | `0x6Eefc633e4E0cBDEe88919A48776a0Cc8b0D624C` | Unified processor address |
 
-The five circuit IDs share this address and the fixed
+All circuit IDs share this address and the fixed
 `eval(uint256,bytes) returns(bytes)` ABI. There are no separate per-circuit
-address or function-signature settings.
+address or function-signature settings. The calculator additionally rejects a
+processor address, proxy bytecode, beacon, implementation, Circuit `#6` owner,
+metadata, or netlist hash that differs from the checked-in pins.
 
 Treat every `NEXT_PUBLIC_*` value as public. Never place a private key, seed
 phrase, signing credential, or secret-bearing RPC URL in these variables.
@@ -231,9 +230,9 @@ deployed processor independently of the website.
 
 ## Roadmap
 
-- Keep the five current circuit IDs reproducible from public chain evidence.
-- Add an 8-bit adder only after a corresponding circuit is deployed and
-  verified, enabling 0–255 addition.
+- Keep Circuits `#1`–`#6` reproducible from public chain evidence.
+- Expand arithmetic only after the corresponding circuit is deployed and
+  independently verified.
 - Add multiplication only after a multiplier circuit is deployed and verified.
 
 The UI will not claim capabilities that the configured processor cannot execute.
